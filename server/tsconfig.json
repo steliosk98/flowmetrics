@@ -1,0 +1,6 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "outDir": "../server-dist", "rootDir": "..", "noEmit": true, "incremental": false, "module": "ESNext", "moduleResolution": "Bundler", "target": "ES2022" },
+  "include": ["./**/*.ts", "../packages/core/**/*.ts"],
+  "exclude": ["../packages/core/**/*.test.ts"]
+}
