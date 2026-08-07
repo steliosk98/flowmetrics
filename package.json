@@ -13,11 +13,11 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:web": "npm run build && node --test tests/rendered-html.test.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint app apps/web/src apps/web/vite.config.ts packages server worker tests",
     "db:generate": "drizzle-kit generate",
     "server:dev": "tsx watch server/index.ts",
     "server:start": "tsx server/index.ts",
-    "build:docker": "vite build --config apps/web/vite.config.ts && tsc -p server/tsconfig.json"
+    "build:docker": "vite build --config apps/web/vite.config.ts && tsc -p server/tsconfig.json && esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=server-dist/index.js"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
@@ -45,6 +45,7 @@
     "@vitejs/plugin-rsc": "0.5.26",
     "cross-env": "^10.1.0",
     "drizzle-kit": "0.31.10",
+    "esbuild": "^0.28.0",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",

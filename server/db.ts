@@ -22,7 +22,7 @@ export async function runMigrations() {
 }
 
 export async function ensureDemoDevice() {
-  const connector = await pool.query<{ id: string }>(`INSERT INTO connectors (connector_type,name) VALUES ('demo','Deterministic demo') ON CONFLICT DO NOTHING RETURNING id`);
+  const connector = await pool.query<{ id: string }>(`INSERT INTO connectors (connector_type,name) VALUES ('demo','Deterministic demo') ON CONFLICT (connector_type,name) DO UPDATE SET updated_at=now() RETURNING id`);
   const connectorId = connector.rows[0]?.id ?? (await pool.query<{ id: string }>("SELECT id FROM connectors WHERE connector_type='demo' ORDER BY created_at LIMIT 1")).rows[0].id;
   const device = await pool.query<{ id: string }>(`INSERT INTO devices (connector_id,vendor,vendor_device_id,model,name,capacity_wh,timezone) VALUES ($1,'demo','demo-delta-2-max','Delta 2 Max','Delta 2 Max',2048,$2) ON CONFLICT (connector_id,vendor_device_id) DO UPDATE SET updated_at=now() RETURNING id`, [connectorId, process.env.TZ ?? "UTC"]);
   return device.rows[0].id;

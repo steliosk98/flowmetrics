@@ -1,0 +1,11 @@
+.git
+.github
+.next
+.vinext
+.wrangler
+node_modules
+coverage
+outputs
+work
+*.log
+FLOWMETRICS_*.md

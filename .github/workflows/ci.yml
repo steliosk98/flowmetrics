@@ -1,0 +1,34 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: flowmetrics_test
+          POSTGRES_USER: flowmetrics
+          POSTGRES_PASSWORD: flowmetrics_ci_only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U flowmetrics -d flowmetrics_test"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://flowmetrics:flowmetrics_ci_only@127.0.0.1:5432/flowmetrics_test
+      FLOWMETRICS_DATA_DIR: /tmp/flowmetrics-data
+      AUTH_MODE: none
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build:docker
+      - run: docker build -t flowmetrics:ci .

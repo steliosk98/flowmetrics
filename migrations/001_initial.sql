@@ -18,7 +18,8 @@ CREATE TABLE connectors (
   updated_at timestamptz NOT NULL DEFAULT now(),
   last_connected_at timestamptz,
   last_error_at timestamptz,
-  last_error text
+  last_error text,
+  UNIQUE (connector_type, name)
 );
 
 CREATE TABLE devices (

@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { DemoConnector, demoSampleAt, EventDetector } from "../packages/core/index";
 import { ensureDemoDevice, persistTelemetry, pool, runMigrations } from "./db";
 import { getSamples, rebuildDay } from "./analytics";
+import { registerAuth } from "./auth";
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info", redact: ["req.headers.authorization", "req.headers.cookie", "*.password", "*.secret", "*.accessKey"] } });
 await app.register(helmet, { contentSecurityPolicy: false });
@@ -14,6 +15,7 @@ await app.register(rateLimit, { max: 240, timeWindow: "1 minute" });
 
 let databaseReady = false; let deviceId = "demo-delta-2-max"; const detector = new EventDetector(); const connector = new DemoConnector();
 try { await runMigrations(); deviceId = await ensureDemoDevice(); databaseReady = true; } catch (error) { app.log.warn({ component: "db", error }, "database unavailable; health remains degraded"); }
+if (databaseReady) await registerAuth(app);
 
 if (process.env.DEMO_MODE !== "false") await connector.start(async sample => {
   sample.deviceId = deviceId;
