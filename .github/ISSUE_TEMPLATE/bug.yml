@@ -1,0 +1,13 @@
+name: Bug report
+description: Report a reproducible FlowMetrics problem
+body:
+  - type: textarea
+    attributes: { label: What happened? }
+    validations: { required: true }
+  - type: textarea
+    attributes: { label: Steps to reproduce }
+    validations: { required: true }
+  - type: input
+    attributes: { label: FlowMetrics version }
+  - type: textarea
+    attributes: { label: Relevant sanitized logs }
