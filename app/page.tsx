@@ -1,15 +1,10 @@
-import type { Metadata } from "next";
-import { SkeletonPreview } from "./_sites-preview/SkeletonPreview";
+import { FlowMetricsApp } from "./flowmetrics-app";
 
-export const metadata: Metadata = {
-  title: "Your site is taking shape",
-  description:
-    "Your first version will appear here automatically when it’s ready.",
-  other: {
-    "codex-preview": "development",
-  },
+export const metadata = {
+  title: "FlowMetrics — Own your energy data",
+  description: "Self-hosted historical analytics for home batteries and solar systems.",
 };
 
 export default function Home() {
-  return <SkeletonPreview />;
+  return <FlowMetricsApp />;
 }
