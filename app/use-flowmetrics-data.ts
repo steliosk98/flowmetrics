@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Data access for the dashboard. Everything rendered in the UI comes from these
@@ -108,30 +108,41 @@ export interface AsyncState<T> {
   data?: T;
   error?: string;
   loading: boolean;
+  /** Re-fetch now. Resolves when the request settles, so callers can await it. */
+  reload: () => Promise<void>;
 }
 
-/** Fetches JSON once, then on an optional interval. */
-export function useJson<T>(path: string, refreshMs?: number): AsyncState<T> {
-  const [state, setState] = useState<AsyncState<T>>({ loading: true });
+/**
+ * Fetches JSON once, then on an optional interval. `reloadToken` is a counter the
+ * dashboard bumps when the user asks for a refresh; changing it re-runs the fetch.
+ */
+export function useJson<T>(path: string, refreshMs?: number, reloadToken = 0): AsyncState<T> {
+  const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: true });
+  const cancelled = useRef(false);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch(path, { headers: { accept: "application/json" } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = (await response.json()) as T;
+      if (!cancelled.current) setState({ data, loading: false });
+    } catch (error) {
+      if (!cancelled.current) setState({ error: (error as Error).message, loading: false });
+    }
+  }, [path]);
 
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const response = await fetch(path, { headers: { accept: "application/json" } });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = (await response.json()) as T;
-        if (!cancelled) setState({ data, loading: false });
-      } catch (error) {
-        if (!cancelled) setState({ error: (error as Error).message, loading: false });
-      }
-    };
+    cancelled.current = false;
+    // load() suspends on `await fetch` before it ever reaches setState, so no
+    // state update happens synchronously here. The rule cannot see across the
+    // useCallback boundary to tell.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
     const timer = refreshMs ? setInterval(() => void load(), refreshMs) : undefined;
-    return () => { cancelled = true; if (timer) clearInterval(timer); };
-  }, [path, refreshMs]);
+    return () => { cancelled.current = true; if (timer) clearInterval(timer); };
+  }, [load, refreshMs, reloadToken]);
 
-  return state;
+  return { ...state, reload: load };
 }
 
 /** Appends ?device= when a device is selected, preserving any existing query. */
@@ -140,61 +151,60 @@ export function withDevice(path: string, deviceId?: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}device=${encodeURIComponent(deviceId)}`;
 }
 
+export type SampleMap = Record<string, Sample>;
+
 /**
- * Latest measurement for one device: seeded from /api/v1/current, then kept
- * current by the SSE stream. Falls back to polling if the stream cannot be
- * established.
+ * One EventSource for the whole dashboard.
+ *
+ * The stream is deliberately not pinned to a device, so a single connection
+ * carries every battery. Opening one per component would exhaust the browser's
+ * per-origin connection limit (about six) once a few batteries are bound.
+ *
+ * Falls back to polling each device's /current when the stream cannot be held.
  */
-export function useLiveSample(deviceId?: string): { sample?: Sample; connected: boolean; loading: boolean } {
-  // The sample is stored together with the device it came from, so switching
-  // devices makes the stale reading fall away on the next render rather than
-  // needing a setState inside the effect body.
-  const [state, setState] = useState<{ deviceId?: string; sample?: Sample; loading: boolean }>({ deviceId, loading: true });
+export function useLiveFeed(deviceIds: string[], reloadToken = 0): { samples: SampleMap; connected: boolean } {
+  const [samples, setSamples] = useState<SampleMap>({});
   const [connected, setConnected] = useState(false);
-  const sampleRef = useRef<Sample | undefined>(undefined);
+  // Joined so the effect re-runs when the set of devices actually changes,
+  // not on every render that rebuilds the array.
+  const key = deviceIds.join(",");
 
   useEffect(() => {
     let cancelled = false;
     let source: EventSource | undefined;
     let pollTimer: ReturnType<typeof setInterval> | undefined;
 
-    sampleRef.current = undefined;
-    const currentPath = withDevice("/api/v1/current", deviceId);
-
     const apply = (next: Sample | null) => {
-      if (cancelled) return;
-      if (!next) { setState({ deviceId, sample: undefined, loading: false }); return; }
-      // Ignore out-of-order frames so the reading never jumps backwards.
-      const previous = sampleRef.current;
-      if (previous && new Date(next.observedAt) < new Date(previous.observedAt)) return;
-      sampleRef.current = next;
-      setState({ deviceId, sample: next, loading: false });
+      if (cancelled || !next?.deviceId) return;
+      setSamples(previous => {
+        const held = previous[next.deviceId];
+        // Ignore out-of-order frames so a reading never jumps backwards.
+        if (held && new Date(next.observedAt) < new Date(held.observedAt)) return previous;
+        return { ...previous, [next.deviceId]: next };
+      });
+    };
+
+    const pollOnce = async () => {
+      const ids = key ? key.split(",") : [];
+      await Promise.all(ids.map(async id => {
+        try {
+          const response = await fetch(withDevice("/api/v1/current", id));
+          if (response.ok) apply((await response.json()) as Sample | null);
+        } catch { /* keep the last known reading */ }
+      }));
     };
 
     const startPolling = () => {
       if (pollTimer) return;
-      const poll = async () => {
-        try {
-          const response = await fetch(currentPath);
-          if (response.ok) apply((await response.json()) as Sample | null);
-        } catch { /* leave the last known reading in place */ }
-      };
-      void poll();
-      pollTimer = setInterval(() => void poll(), 15_000);
+      void pollOnce();
+      pollTimer = setInterval(() => void pollOnce(), 15_000);
     };
 
-    void (async () => {
-      try {
-        const response = await fetch(currentPath);
-        if (response.ok) apply((await response.json()) as Sample | null);
-        else if (!cancelled) setState({ deviceId, sample: undefined, loading: false });
-      } catch {
-        if (!cancelled) setState({ deviceId, sample: undefined, loading: false });
-      }
-    })();
+    // Seed immediately; the stream then keeps things current.
+    void pollOnce();
 
     try {
-      source = new EventSource(withDevice("/api/v1/live", deviceId));
+      source = new EventSource("/api/v1/live");
       source.addEventListener("telemetry", event => {
         setConnected(true);
         try { apply(JSON.parse((event as MessageEvent).data) as Sample); } catch { /* malformed frame */ }
@@ -210,11 +220,20 @@ export function useLiveSample(deviceId?: string): { sample?: Sample; connected: 
     }
 
     return () => { cancelled = true; source?.close(); if (pollTimer) clearInterval(pollTimer); };
-  }, [deviceId]);
+  }, [key, reloadToken]);
 
-  // Anything held for a different device is not this device's reading.
-  const fresh = state.deviceId === deviceId;
-  return { sample: fresh ? state.sample : undefined, connected, loading: fresh ? state.loading : true };
+  return { samples, connected };
+}
+
+/** Net power for a battery, used for the at-a-glance battery cards. */
+export function batteryFlow(sample: Sample | undefined) {
+  return {
+    solarW: sample?.solarInputW,
+    gridW: sample?.gridInputW,
+    loadW: sample?.totalOutputW,
+    chargeW: sample?.batteryChargePowerW,
+    dischargeW: sample?.batteryDischargePowerW,
+  };
 }
 
 // ---- formatting helpers ----------------------------------------------------

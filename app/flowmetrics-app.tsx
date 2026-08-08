@@ -1,10 +1,10 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   batteryLabel, EVENT_LABELS, eventKind, formatClock, formatDuration, formatKwh, formatPct,
-  formatCount, formatRelative, formatWatts, toNum, useJson, useLiveSample, withDevice,
-  type DailyRow, type DeviceSummary, type EventRow, type Numeric, type Sample, type StatsResponse, type StatusResponse,
+  formatCount, formatRelative, formatWatts, toNum, useJson, useLiveFeed, withDevice,
+  type DailyRow, type DeviceSummary, type EventRow, type Numeric, type Sample, type SampleMap, type StatsResponse, type StatusResponse,
 } from "./use-flowmetrics-data";
 
 type NavKey = "Overview" | "History" | "Events" | "Devices" | "Data" | "Settings" | "About";
@@ -25,12 +25,31 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * The device every page reads from. Several batteries can be bound to one
- * EcoFlow account, and they are tracked separately — totals are never summed
- * across packs, because a combined state of charge would not mean anything.
+ * Shared dashboard state. Several batteries can be bound to one EcoFlow account,
+ * and they are tracked separately — totals are never summed across packs,
+ * because a combined state of charge would not mean anything.
+ *
+ * Live samples come from one shared stream held by the shell, so adding a panel
+ * costs no extra connection.
  */
-const DeviceContext = createContext<string | undefined>(undefined);
-const useDeviceId = () => useContext(DeviceContext);
+interface DashboardValue {
+  deviceId?: string;
+  setDeviceId: (id: string) => void;
+  devices: DeviceSummary[];
+  samples: SampleMap;
+  connected: boolean;
+  /** Bumped by the refresh control; every useJson call re-fetches when it changes. */
+  reloadToken: number;
+  refresh: () => void;
+  refreshing: boolean;
+}
+
+const DashboardContext = createContext<DashboardValue>({
+  setDeviceId: () => {}, devices: [], samples: {}, connected: false, reloadToken: 0, refresh: () => {}, refreshing: false,
+});
+const useDashboard = () => useContext(DashboardContext);
+/** Latest reading for one device, taken from the shared stream. */
+const useSample = (deviceId?: string) => { const { samples } = useDashboard(); return deviceId ? samples[deviceId] : undefined; };
 
 function MiniIcon({ name }: { name: IconName | "sun" | "grid" | "battery" | "load" | "leaf" | "moon" | "bell" }) {
   const glyphs: Record<string, string> = { overview: "⌂", history: "↗", events: "≋", devices: "▣", data: "↓", settings: "⚙", about: "i", sun: "☀", grid: "⌁", battery: "▤", load: "⌂", leaf: "♧", moon: "◐", bell: "•" };
@@ -88,12 +107,56 @@ function SocChart({ points }: { points: Sample[] }) {
   </div>;
 }
 
+/**
+ * Every battery at a glance. Each card is its own reading — nothing here is
+ * summed across packs. Selecting a card points the rest of the page at it.
+ */
+function BatteryStrip() {
+  const { devices, samples, deviceId, setDeviceId } = useDashboard();
+  if (devices.length < 2) return null;
+
+  return <section className="battery-strip" aria-label="All batteries">
+    {devices.map(device => {
+      const sample = samples[device.id];
+      const online = sample?.deviceOnline ?? device.online ?? undefined;
+      const soc = sample?.batterySocPct ?? device.batterySocPct ?? undefined;
+      const selected = device.id === deviceId;
+      const charge = sample?.batteryChargePowerW ?? 0;
+      const discharge = sample?.batteryDischargePowerW ?? 0;
+      const state = charge > discharge ? "charging" : discharge > 0 ? "discharging" : "idle";
+
+      return <button
+        key={device.id}
+        type="button"
+        className={`battery-chip panel${selected ? " selected" : ""}`}
+        aria-pressed={selected}
+        onClick={() => setDeviceId(device.id)}
+      >
+        <span className="chip-head">
+          <b>{device.name}</b>
+          <span className="chip-status"><StatusDot warn={online === false}/>{online === undefined ? "no data" : online ? "online" : "offline"}</span>
+        </span>
+        <span className="chip-soc">
+          <strong>{formatPct(soc)}</strong>
+          <span className="chip-bar"><i style={{ width: `${soc ?? 0}%` }}/></span>
+          <small>{state}{state === "charging" ? ` ${formatWatts(charge)}` : state === "discharging" ? ` ${formatWatts(discharge)}` : ""}</small>
+        </span>
+        <span className="chip-flows">
+          <span><i className="solar-key"/>{formatWatts(sample?.solarInputW)}</span>
+          <span><i className="grid-key"/>{formatWatts(sample?.gridInputW)}</span>
+          <span><i className="load-key"/>{formatWatts(sample?.totalOutputW)}</span>
+        </span>
+      </button>;
+    })}
+  </section>;
+}
+
 function Overview() {
-  const deviceId = useDeviceId();
-  const { sample, connected } = useLiveSample(deviceId);
-  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", deviceId), 60_000);
-  const history = useJson<{ points: Sample[] }>(withDevice("/api/v1/history", deviceId), 120_000);
-  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000);
+  const { deviceId, connected, reloadToken } = useDashboard();
+  const sample = useSample(deviceId);
+  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", deviceId), 60_000, reloadToken);
+  const history = useJson<{ points: Sample[] }>(withDevice("/api/v1/history", deviceId), 120_000, reloadToken);
+  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000, reloadToken);
 
   const points = history.data?.points ?? [];
   const today = summary.data;
@@ -117,6 +180,7 @@ function Overview() {
   ];
 
   return <>
+    <BatteryStrip/>
     <section className="hero-grid">
       <div className="live-card panel">
         <div className="section-heading"><div><p className="eyebrow">LIVE POWER FLOW</p><h2>Right now</h2></div><div className="live-pill"><StatusDot warn={!connected} /> {connected ? "Live" : "Reconnecting"}</div></div>
@@ -198,8 +262,8 @@ function dayLabel(iso: string) {
 }
 
 function History() {
-  const deviceId = useDeviceId();
-  const daily = useJson<DailyRow[]>(withDevice("/api/v1/daily", deviceId), 300_000);
+  const { deviceId, reloadToken } = useDashboard();
+  const daily = useJson<DailyRow[]>(withDevice("/api/v1/daily", deviceId), 300_000, reloadToken);
   const rows = daily.data ?? [];
   const recent = rows.slice(0, 7);
   const peak = Math.max(1, ...recent.flatMap(r => [r.solar_energy_wh, r.grid_energy_wh, r.total_output_wh].map(v => toNum(v) ?? 0)));
@@ -243,8 +307,8 @@ function History() {
 }
 
 function Events() {
-  const deviceId = useDeviceId();
-  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 30_000);
+  const { deviceId, reloadToken } = useDashboard();
+  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 30_000, reloadToken);
   const [filter, setFilter] = useState<string>("all");
   const rows = events.data ?? [];
   const counts = { solar: 0, charge: 0, discharge: 0, grid: 0, quality: 0, full: 0 } as Record<string, number>;
@@ -274,18 +338,17 @@ function Events() {
 }
 
 function Devices() {
-  const status = useJson<StatusResponse>("/api/v1/status", 15_000);
-  const list = useJson<DeviceSummary[]>("/api/v1/devices", 15_000);
+  const { devices, reloadToken } = useDashboard();
+  const status = useJson<StatusResponse>("/api/v1/status", 15_000, reloadToken);
   const collector = status.data?.collector;
   const mode = status.data?.mode;
   const connectorName = mode === "ecoflow" ? "EcoFlow IoT Open Platform" : mode === "demo" ? "Deterministic demo" : "Collection disabled";
-  const devices = list.data ?? [];
 
   return <div className="page-stack">
     <section className="page-intro"><div><p className="eyebrow">DEVICES</p><h1>Your energy system</h1><p>Every battery this instance records, with connector health and the latest observed measurements.</p></div></section>
     <section className="device-grid">
       {devices.map(device => <DeviceCard key={device.id} device={device} connectorName={connectorName}/>)}
-      {!devices.length && <div className="panel"><Empty>{list.loading ? "Loading devices…" : "No devices registered."}</Empty></div>}
+      {!devices.length && <div className="panel"><Empty>No devices registered.</Empty></div>}
       <div className="panel connector-card">
         <p className="eyebrow">CONNECTOR HEALTH</p>
         <h2>{connectorName}</h2>
@@ -304,9 +367,10 @@ function Devices() {
 }
 
 function DeviceCard({ device, connectorName }: { device: DeviceSummary; connectorName: string }) {
-  // Each card streams its own device rather than the globally selected one.
-  const { sample } = useLiveSample(device.id);
-  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", device.id), 60_000);
+  // Reads this device from the shared stream — no extra connection per card.
+  const { reloadToken } = useDashboard();
+  const sample = useSample(device.id);
+  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", device.id), 60_000, reloadToken);
   const online = sample?.deviceOnline ?? device.online ?? undefined;
   const soc = sample?.batterySocPct ?? device.batterySocPct ?? undefined;
 
@@ -338,8 +402,8 @@ function DeviceCard({ device, connectorName }: { device: DeviceSummary; connecto
 }
 
 function DataPage() {
-  const deviceId = useDeviceId();
-  const stats = useJson<StatsResponse>(withDevice("/api/v1/stats", deviceId), 60_000);
+  const { deviceId, reloadToken } = useDashboard();
+  const stats = useJson<StatsResponse>(withDevice("/api/v1/stats", deviceId), 60_000, reloadToken);
   const s = stats.data;
   const exports: [string, string, string][] = [
     ["Raw telemetry", "Normalized measurements for the last 24 hours.", withDevice("/api/v1/export/telemetry.csv", deviceId)],
@@ -367,9 +431,9 @@ function DataPage() {
 }
 
 function Settings() {
-  const deviceId = useDeviceId();
-  const status = useJson<StatusResponse>("/api/v1/status", 30_000);
-  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", deviceId), 60_000);
+  const { deviceId, reloadToken } = useDashboard();
+  const status = useJson<StatusResponse>("/api/v1/status", 30_000, reloadToken);
+  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", deviceId), 60_000, reloadToken);
   const s = status.data;
   // Configuration is owned by .env and applied at startup, so this page reports
   // what the running service is actually using rather than offering controls
@@ -403,24 +467,45 @@ export function FlowMetricsApp() {
   const [dark, setDark] = useState(false);
   const [menu, setMenu] = useState(false);
   const [selected, setSelected] = useState<string | undefined>();
+  const [reloadToken, setReloadToken] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const deviceList = useJson<DeviceSummary[]>("/api/v1/devices", 30_000);
-  const status = useJson<StatusResponse>("/api/v1/status", 30_000);
+  const deviceList = useJson<DeviceSummary[]>("/api/v1/devices", 30_000, reloadToken);
+  const status = useJson<StatusResponse>("/api/v1/status", 30_000, reloadToken);
   const devices = useMemo(() => deviceList.data ?? [], [deviceList.data]);
   const deviceId = selected ?? devices[0]?.id;
   const device = devices.find(d => d.id === deviceId);
 
-  const { sample } = useLiveSample(deviceId);
-  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000);
+  // One stream for the whole dashboard, covering every battery.
+  const deviceIds = useMemo(() => devices.map(d => d.id), [devices]);
+  const { samples, connected } = useLiveFeed(deviceIds, reloadToken);
+  const sample = deviceId ? samples[deviceId] : undefined;
+
+  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000, reloadToken);
   const mode = status.data?.mode;
   const today = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   const soc = sample?.batterySocPct ?? device?.batterySocPct ?? undefined;
   const warningCount = (events.data ?? []).filter(e => e.severity === "warning").length;
 
+  const reload = deviceList.reload;
+  const refresh = useCallback(() => {
+    setRefreshing(true);
+    // Bumping the token re-runs every useJson on the page and reconnects the
+    // stream. The spinner tracks the device fetch this component owns, so it
+    // reflects a real round-trip rather than a fixed delay.
+    setReloadToken(token => token + 1);
+    void reload().finally(() => setRefreshing(false));
+  }, [reload]);
+
   useEffect(() => { document.documentElement.dataset.theme = dark ? "dark" : "light"; }, [dark]);
   const content = useMemo(() => ({ Overview: <Overview/>, History: <History/>, Events: <Events/>, Devices: <Devices/>, Data: <DataPage/>, Settings: <Settings/>, About: <About/> })[active], [active]);
 
-  return <DeviceContext.Provider value={deviceId}>
+  const value = useMemo<DashboardValue>(
+    () => ({ deviceId, setDeviceId: setSelected, devices, samples, connected, reloadToken, refresh, refreshing }),
+    [deviceId, devices, samples, connected, reloadToken, refresh, refreshing],
+  );
+
+  return <DashboardContext.Provider value={value}>
     <div className="app-shell">
       <aside className={menu ? "sidebar open" : "sidebar"}>
         <div className="brand"><span className="brand-mark"><i/><i/><i/></span><span><b>FlowMetrics</b><small>Own your energy data.</small></span></div>
@@ -445,6 +530,12 @@ export function FlowMetricsApp() {
           <button className="mobile-menu" onClick={()=>setMenu(!menu)} aria-label="Toggle navigation">☰</button>
           <div><p>{active === "Overview" ? today : active}</p><span>{active === "Overview" ? (devices.length > 1 && device ? `${device.name} — a clear view of your home energy.` : "A clear view of your home energy.") : "FlowMetrics energy historian"}</span></div>
           <div className="top-actions">
+            <span className={`feed-state${connected ? " live" : ""}`} title={connected ? "Live stream connected" : "Stream disconnected — polling instead"}>
+              <StatusDot warn={!connected}/>{connected ? "Live" : "Polling"}
+            </span>
+            <button className={`round-button refresh${refreshing ? " busy" : ""}`} onClick={refresh} disabled={refreshing} aria-label="Refresh feed" title="Refresh feed">
+              <span className="icon" aria-hidden="true">⟳</span>
+            </button>
             <button className="round-button" onClick={()=>setDark(!dark)} aria-label="Toggle color theme"><MiniIcon name="moon"/></button>
             <div className="avatar">SK</div>
           </div>
@@ -452,5 +543,5 @@ export function FlowMetricsApp() {
         <main>{content}</main>
       </div>
     </div>
-  </DeviceContext.Provider>;
+  </DashboardContext.Provider>;
 }

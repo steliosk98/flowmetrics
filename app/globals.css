@@ -152,4 +152,33 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
 }
 
 @media(max-width:1100px){.metric-grid{grid-template-columns:1fr 1fr}.hero-grid,.two-col,.device-grid{grid-template-columns:1fr}.history-summary,.export-grid{grid-template-columns:1fr 1fr}.impact-card{min-height:300px}.data-health{grid-template-columns:repeat(3,1fr)}.data-health div:nth-child(3){border-right:0}}
-@media(max-width:760px){.sidebar{transform:translateX(-100%);transition:.2s}.sidebar.open{transform:translateX(0);box-shadow:20px 0 60px #0007}.main-shell{margin-left:0;width:100%}.mobile-menu{display:block;border:0;background:none;font-size:18px}.topbar{padding:0 15px;height:70px}.topbar>div:first-of-type span,.date-button,.round-button.bell{display:none}.top-actions{gap:7px}main{padding:20px 14px 55px}.hero-grid,.metric-grid,.two-col,.history-summary,.export-grid,.settings-layout{grid-template-columns:1fr}.live-card,.impact-card,.chart-panel,.soc-panel,.timeline-panel,.detail-card{padding:18px}.flow-stage{transform:scale(.9);margin:0 -18px}.section-heading{gap:10px}.chart-actions{display:block}.chart-actions .legend{margin:7px 0}.power-chart{height:260px}.analytics-row{grid-template-columns:1fr}.stat-list{grid-template-columns:1fr}.page-intro{align-items:flex-start;gap:15px}.range-tabs,.filter-row{width:100%;overflow:auto}.range-tabs button,.filter-row button{white-space:nowrap}.bar-chart{padding:0}.bar-group i{width:7px}.data-table{overflow-x:auto}.table-row{min-width:620px}.event-log{padding:10px 14px}.event-log-row{grid-template-columns:35px 1fr auto}.event-log-row .duration,.event-log-row button{display:none}.device-stats{grid-template-columns:1fr}.data-health{grid-template-columns:1fr 1fr}.data-health div{border-bottom:1px solid var(--line)}.coverage-card{display:block}.coverage-score{text-align:left;margin-top:15px}.about-page{margin:25px auto}.about-page h1{font-size:34px}.about-values{grid-template-columns:1fr}.topbar .avatar{display:none}}
+
+/* All batteries at a glance, above the selected battery's detail. */
+.battery-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-bottom:16px}
+.battery-chip{padding:15px 16px;display:flex;flex-direction:column;gap:11px;text-align:left;font:inherit;color:inherit;cursor:pointer;border:1px solid var(--line);transition:border-color .15s,box-shadow .15s,transform .15s}
+.battery-chip:hover{border-color:color-mix(in srgb,var(--green) 45%,var(--line));transform:translateY(-1px)}
+.battery-chip:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.battery-chip.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green) inset,0 6px 18px rgba(40,90,65,.07)}
+.chip-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.chip-head b{font-size:12px;font-weight:750;letter-spacing:-.1px}
+.chip-status{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:9px;text-transform:lowercase}
+.chip-soc{display:block}
+.chip-soc strong{font-size:23px;letter-spacing:-.6px;line-height:1.1}
+.chip-bar{display:block;height:5px;border-radius:3px;background:var(--green-soft);overflow:hidden;margin:7px 0 5px}
+.chip-bar i{display:block;height:100%;border-radius:3px;background:var(--green)}
+.chip-soc small{color:var(--muted);font-size:9px}
+.chip-flows{display:flex;gap:12px;padding-top:9px;border-top:1px solid var(--line)}
+.chip-flows span{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:9px;font-variant-numeric:tabular-nums}
+.chip-flows i{width:6px;height:6px;border-radius:2px;flex:0 0 auto}
+.chip-flows .solar-key{background:var(--solar)}.chip-flows .grid-key{background:var(--grid)}.chip-flows .load-key{background:var(--load)}
+
+/* Live/polling indicator and manual refresh. */
+.top-actions .feed-state{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;padding:0 4px;margin:0;text-transform:uppercase;letter-spacing:.5px}
+.round-button.refresh{display:grid;place-items:center}
+.round-button.refresh:disabled{cursor:progress;opacity:.75}
+.round-button.refresh .icon{display:block;line-height:1}
+.round-button.refresh.busy .icon{animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.round-button.refresh.busy .icon{animation:none}.battery-chip:hover{transform:none}}
+
+@media(max-width:760px){.sidebar{transform:translateX(-100%);transition:.2s}.sidebar.open{transform:translateX(0);box-shadow:20px 0 60px #0007}.main-shell{margin-left:0;width:100%}.mobile-menu{display:block;border:0;background:none;font-size:18px}.topbar{padding:0 15px;height:70px}.topbar>div:first-of-type span,.date-button,.round-button.bell{display:none}.top-actions .feed-state{display:none}.battery-strip{grid-template-columns:1fr}.top-actions{gap:7px}main{padding:20px 14px 55px}.hero-grid,.metric-grid,.two-col,.history-summary,.export-grid,.settings-layout{grid-template-columns:1fr}.live-card,.impact-card,.chart-panel,.soc-panel,.timeline-panel,.detail-card{padding:18px}.flow-stage{transform:scale(.9);margin:0 -18px}.section-heading{gap:10px}.chart-actions{display:block}.chart-actions .legend{margin:7px 0}.power-chart{height:260px}.analytics-row{grid-template-columns:1fr}.stat-list{grid-template-columns:1fr}.page-intro{align-items:flex-start;gap:15px}.range-tabs,.filter-row{width:100%;overflow:auto}.range-tabs button,.filter-row button{white-space:nowrap}.bar-chart{padding:0}.bar-group i{width:7px}.data-table{overflow-x:auto}.table-row{min-width:620px}.event-log{padding:10px 14px}.event-log-row{grid-template-columns:35px 1fr auto}.event-log-row .duration,.event-log-row button{display:none}.device-stats{grid-template-columns:1fr}.data-health{grid-template-columns:1fr 1fr}.data-health div{border-bottom:1px solid var(--line)}.coverage-card{display:block}.coverage-score{text-align:left;margin-top:15px}.about-page{margin:25px auto}.about-page h1{font-size:34px}.about-values{grid-template-columns:1fr}.topbar .avatar{display:none}}

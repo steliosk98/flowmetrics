@@ -230,15 +230,24 @@ app.get<{ Querystring: DeviceQuery & { from?:string; to?:string } }>("/api/v1/ex
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/live", async (request, reply) => {
-  const device = resolveDevice(request.query.device);
+  // Only pin the stream when a device is explicitly requested. Without ?device=
+  // the client receives every device, which lets one connection drive a whole
+  // dashboard instead of one EventSource per battery.
+  const pinned = request.query.device ? resolveDevice(request.query.device) : undefined;
+  const seed = pinned ? [pinned] : deviceList();
+
   reply.hijack();
   const raw = reply.raw;
   raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
-  const client = { res: raw, deviceId: device?.id };
+  const client = { res: raw, deviceId: pinned?.id };
   liveClients.add(client);
+
   // Send the most recent measurement immediately so a new tab is not blank
   // until the next poll lands.
-  if (device?.latestSample) raw.write(`event: telemetry\ndata: ${JSON.stringify({ ...device.latestSample, deviceId: device.id })}\n\n`);
+  for (const device of seed) {
+    if (device.latestSample) raw.write(`event: telemetry\ndata: ${JSON.stringify({ ...device.latestSample, deviceId: device.id })}\n\n`);
+  }
+
   // Comment frames keep proxies from closing an idle stream between samples.
   const keepAlive = setInterval(() => { try { raw.write(": keep-alive\n\n"); } catch { /* closed */ } }, 20_000);
   raw.on("close", () => { clearInterval(keepAlive); liveClients.delete(client); });
