@@ -62,6 +62,10 @@ Verify credentials and see what your hardware actually reports before starting t
 node scripts/ecoflow-probe.mjs
 ```
 
+Several batteries on one account are each recorded separately, with an optional combined site view (`?device=all`) that sums power and energy but weights state of charge by capacity and omits figures that cannot be honestly combined.
+
+Note that EcoFlow's API serves the device's *last reported state*, not a live read — an idle DELTA 2 can go many minutes between reports. Repeated readings are flagged and the dashboard shows when the device last reported a change.
+
 Other EcoFlow models authenticate fine but report different quota keys and need their own mapping module. See [EcoFlow support](docs/ecoflow.md).
 
 ## Backup

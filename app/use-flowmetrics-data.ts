@@ -1,6 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { combineSamples, COMBINED_DEVICE_ID } from "../packages/core/aggregate";
+import type { NormalizedTelemetry } from "../packages/core/telemetry";
+
+export { COMBINED_DEVICE_ID };
 
 /**
  * Data access for the dashboard. Everything rendered in the UI comes from these
@@ -91,7 +95,12 @@ export interface DeviceSummary {
   capacityWh: number | null;
   online: boolean | null;
   batterySocPct: number | null;
+  /** When we last polled. */
   lastObservedAt: string | null;
+  /** When the device itself last reported a change; can be much older. */
+  lastChangedAt: string | null;
+  /** True for the synthetic "All batteries" entry. */
+  combined: boolean;
 }
 
 export interface StatsResponse {
@@ -143,6 +152,19 @@ export function useJson<T>(path: string, refreshMs?: number, reloadToken = 0): A
   }, [load, refreshMs, reloadToken]);
 
   return { ...state, reload: load };
+}
+
+/**
+ * A clock that ticks, so relative times ("2 min ago", the stale badge) actually
+ * advance instead of freezing until an unrelated re-render happens to occur.
+ */
+export function useNow(intervalMs = 30_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs]);
+  return now;
 }
 
 /** Appends ?device= when a device is selected, preserving any existing query. */
@@ -223,6 +245,29 @@ export function useLiveFeed(deviceIds: string[], reloadToken = 0): { samples: Sa
   }, [key, reloadToken]);
 
   return { samples, connected };
+}
+
+/**
+ * Site-level reading derived from the live feed, using the same tested
+ * aggregation the server uses so the two can never disagree. Samples cross the
+ * wire as ISO strings, so they are converted to Dates and back around the call.
+ */
+export function combineLiveSamples(
+  samples: Sample[],
+  capacityOf: (deviceId: string) => number | undefined,
+  expectedDeviceCount: number,
+): Sample | undefined {
+  if (!samples.length) return undefined;
+  const asDomain = samples.map(s => ({
+    ...s,
+    observedAt: new Date(s.observedAt),
+    receivedAt: new Date(s.receivedAt),
+    qualityFlags: s.qualityFlags ?? 0,
+  })) as NormalizedTelemetry[];
+
+  const combined = combineSamples(asDomain, capacityOf, expectedDeviceCount);
+  if (!combined) return undefined;
+  return { ...combined, observedAt: combined.observedAt.toISOString(), receivedAt: combined.receivedAt.toISOString() } as Sample;
 }
 
 /** Net power for a battery, used for the at-a-glance battery cards. */

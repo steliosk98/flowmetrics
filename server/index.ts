@@ -5,11 +5,12 @@ import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ServerResponse } from "node:http";
-import { demoSampleAt, EventDetector, type NormalizedTelemetry } from "../packages/core/index";
+import { combineDailySeries, combineSamples, combineSeries, COMBINED_DEVICE_ID, demoSampleAt, EventDetector, type NormalizedTelemetry } from "../packages/core/index";
 import { ensureDevice, persistTelemetry, pool, runMigrations } from "./db";
 import { getSamples, rebuildDay, rowToSample } from "./analytics";
 import { registerAuth } from "./auth";
 import { buildConnector } from "./connector";
+import { QUALITY_FLAGS } from "../packages/connectors/ecoflow-delta2-mapping";
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info", redact: ["req.headers.authorization", "req.headers.cookie", "*.password", "*.secret", "*.accessKey", "*.secretKey", "*.certificatePassword"] } });
 await app.register(helmet, { contentSecurityPolicy: false });
@@ -32,6 +33,9 @@ interface TrackedDevice {
    *  would interleave their transitions and emit nonsense. */
   detector: EventDetector;
   latestSample?: NormalizedTelemetry;
+  /** When the device last reported something different, as opposed to when we
+   *  last polled. EcoFlow re-serves an idle device's previous report. */
+  lastChangedAt?: Date;
 }
 
 let databaseReady = false;
@@ -78,6 +82,7 @@ async function handleSample(sample: NormalizedTelemetry) {
   const device = bySerial.get(sample.deviceId) ?? defaultDevice();
   if (!device) return;
   sample.deviceId = device.id;
+  if (!(sample.qualityFlags & QUALITY_FLAGS.REPEATED_READING)) device.lastChangedAt = sample.observedAt;
   device.latestSample = sample;
   broadcast(device, sample);
   if (!databaseReady) return;
@@ -139,6 +144,12 @@ try {
   }
 }
 
+/** True when the caller asked for the combined site view. */
+const wantsCombined = (device?: string) => device === COMBINED_DEVICE_ID;
+const capacityOf = (id: string) => devices.get(id)?.capacityWh;
+/** Every device id, for fan-out queries. */
+const allDeviceIds = () => deviceList().map(d => d.id);
+
 function collectorHealth() {
   const health = connector?.getHealth() ?? { status: "stopped" as const, error: "collector disabled" };
   return collectorError ? { ...health, status: "degraded" as const, error: collectorError } : health;
@@ -148,20 +159,56 @@ app.get("/api/v1/health", async (_request, reply) => reply.code(databaseReady ? 
 app.get("/api/v1/status", async () => ({ version: "0.1.0", mode, databaseReady, rawPayloads: process.env.STORE_RAW_PAYLOADS === "true", expectedIntervalSeconds, collector: collectorHealth(), deviceCount: devices.size }));
 
 /** Every device this instance records, for the dashboard's device switcher. */
-app.get("/api/v1/devices", async () => deviceList().map(device => ({
-  id: device.id,
-  vendorDeviceId: device.vendorDeviceId,
-  name: device.name,
-  model: device.model,
-  capacityWh: device.capacityWh ?? null,
-  online: device.latestSample?.deviceOnline ?? null,
-  batterySocPct: device.latestSample?.batterySocPct ?? null,
-  lastObservedAt: device.latestSample?.observedAt ?? null,
-})));
+app.get("/api/v1/devices", async () => {
+  const list = deviceList().map(device => ({
+    id: device.id,
+    vendorDeviceId: device.vendorDeviceId,
+    name: device.name,
+    model: device.model,
+    capacityWh: device.capacityWh ?? null,
+    online: device.latestSample?.deviceOnline ?? null,
+    batterySocPct: device.latestSample?.batterySocPct ?? null,
+    lastObservedAt: device.latestSample?.observedAt ?? null,
+    // When the device itself last reported a change. EcoFlow re-serves the last
+    // report for an idle battery, so this can be far older than lastObservedAt.
+    lastChangedAt: device.lastChangedAt ?? null,
+    combined: false,
+  }));
+
+  // A combined entry only means something with more than one battery.
+  if (list.length > 1) {
+    const combined = combineSamples(
+      deviceList().map(d => d.latestSample).filter((s): s is NormalizedTelemetry => s !== undefined),
+      capacityOf,
+      list.length,
+    );
+    const capacities = deviceList().map(d => d.capacityWh).filter((c): c is number => c !== undefined);
+    list.push({
+      id: COMBINED_DEVICE_ID,
+      vendorDeviceId: COMBINED_DEVICE_ID,
+      name: "All batteries",
+      model: `${list.length} batteries combined`,
+      capacityWh: capacities.length === list.length ? capacities.reduce((a, b) => a + b, 0) : null,
+      online: combined?.deviceOnline ?? null,
+      batterySocPct: combined?.batterySocPct ?? null,
+      lastObservedAt: combined?.observedAt ?? null,
+      lastChangedAt: deviceList().reduce<Date | null>((oldest, d) => {
+        if (!d.lastChangedAt) return oldest;
+        return !oldest || d.lastChangedAt < oldest ? d.lastChangedAt : oldest;
+      }, null),
+      combined: true,
+    });
+  }
+  return list;
+});
 
 type DeviceQuery = { device?: string };
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/current", async request => {
+  if (wantsCombined(request.query.device)) {
+    const latest = deviceList().map(d => d.latestSample).filter((s): s is NormalizedTelemetry => s !== undefined);
+    return combineSamples(latest, capacityOf, devices.size) ?? null;
+  }
   const device = resolveDevice(request.query.device);
   if (!device) return isDemo ? demoSampleAt(new Date()) : null;
   if (databaseReady) {
@@ -176,12 +223,26 @@ app.get<{ Querystring: DeviceQuery }>("/api/v1/current", async request => {
 
 app.get<{ Querystring: DeviceQuery & { from?: string; to?: string; maxPoints?: string } }>("/api/v1/history", async request => {
   const to = request.query.to ? new Date(request.query.to) : new Date(); const from = request.query.from ? new Date(request.query.from) : new Date(to.getTime()-86_400_000);
+  const maxPoints = Math.min(5000, Math.max(100, Number(request.query.maxPoints ?? 3000)));
+
+  if (wantsCombined(request.query.device) && databaseReady) {
+    const series = await Promise.all(allDeviceIds().map(id => getSamples(id, from, to, maxPoints)));
+    // Buckets are the poll interval, so batteries polled seconds apart line up.
+    return { from, to, points: combineSeries(series, capacityOf, expectedIntervalSeconds) };
+  }
+
   const device = resolveDevice(request.query.device);
   if (!databaseReady || !device) return { from, to, coveragePct: isDemo ? 100 : 0, points: isDemo ? Array.from({ length: 288 },(_,i)=>demoSampleAt(new Date(from.getTime()+i*300_000))) : [] };
-  const points = await getSamples(device.id,from,to,Math.min(5000,Math.max(100,Number(request.query.maxPoints ?? 3000)))); return { from,to,points };
+  const points = await getSamples(device.id,from,to,maxPoints); return { from,to,points };
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/summary", async request => {
+  if (wantsCombined(request.query.device) && databaseReady) {
+    const ids = allDeviceIds();
+    await Promise.all(ids.map(id => rebuildDay(id, new Date(), expectedIntervalSeconds)));
+    const rows = await pool.query("SELECT * FROM energy_daily WHERE device_id = ANY($1) AND local_date = (SELECT max(local_date) FROM energy_daily WHERE device_id = ANY($1))", [ids]);
+    return combineDailySeries(rows.rows)[0] ?? {};
+  }
   const device = resolveDevice(request.query.device);
   if (!databaseReady || !device) return { coveragePct: isDemo ? 100 : 0, mode };
   await rebuildDay(device.id,new Date(),expectedIntervalSeconds);
@@ -190,22 +251,33 @@ app.get<{ Querystring: DeviceQuery }>("/api/v1/summary", async request => {
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/daily", async request => {
+  if (wantsCombined(request.query.device) && databaseReady) {
+    const rows = await pool.query("SELECT * FROM energy_daily WHERE device_id = ANY($1) ORDER BY local_date DESC LIMIT 732", [allDeviceIds()]);
+    return combineDailySeries(rows.rows).slice(0, 366);
+  }
   const device = resolveDevice(request.query.device);
   return databaseReady && device ? (await pool.query("SELECT * FROM energy_daily WHERE device_id=$1 ORDER BY local_date DESC LIMIT 366",[device.id])).rows : [];
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/events", async request => {
+  if (wantsCombined(request.query.device) && databaseReady) {
+    // Events stay per battery — merged into one timeline, labelled by device.
+    const rows = await pool.query("SELECT e.*, d.name AS device_name FROM device_events e JOIN devices d ON d.id=e.device_id WHERE e.device_id = ANY($1) ORDER BY e.started_at DESC LIMIT 500", [allDeviceIds()]);
+    return rows.rows;
+  }
   const device = resolveDevice(request.query.device);
   return databaseReady && device ? (await pool.query("SELECT * FROM device_events WHERE device_id=$1 ORDER BY started_at DESC LIMIT 500",[device.id])).rows : [];
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/stats", async (request, reply) => {
-  const device = resolveDevice(request.query.device);
-  if (!databaseReady || !device) return reply.code(503).send({ error: "database unavailable" });
-  const samples = await pool.query<{ count: string; first: string | null; last: string | null }>("SELECT count(*)::text AS count, min(observed_at) AS first, max(observed_at) AS last FROM telemetry_samples WHERE device_id=$1", [device.id]);
-  const coverage = await pool.query<{ coverage: string | null; days: string }>("SELECT avg(coverage_pct)::text AS coverage, count(*)::text AS days FROM energy_daily WHERE device_id=$1", [device.id]);
+  const combined = wantsCombined(request.query.device);
+  const device = combined ? undefined : resolveDevice(request.query.device);
+  if (!databaseReady || (!device && !combined)) return reply.code(503).send({ error: "database unavailable" });
+  const ids = combined ? allDeviceIds() : [(device as TrackedDevice).id];
+  const samples = await pool.query<{ count: string; first: string | null; last: string | null }>("SELECT count(*)::text AS count, min(observed_at) AS first, max(observed_at) AS last FROM telemetry_samples WHERE device_id = ANY($1)", [ids]);
+  const coverage = await pool.query<{ coverage: string | null; days: string }>("SELECT avg(coverage_pct)::text AS coverage, count(DISTINCT local_date)::text AS days FROM energy_daily WHERE device_id = ANY($1)", [ids]);
   const size = await pool.query<{ size: string }>("SELECT pg_size_pretty(pg_database_size(current_database())) AS size");
-  const events = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM device_events WHERE device_id=$1", [device.id]);
+  const events = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM device_events WHERE device_id = ANY($1)", [ids]);
   return {
     sampleCount: Number(samples.rows[0]?.count ?? 0),
     firstObservedAt: samples.rows[0]?.first ?? null,
@@ -222,9 +294,12 @@ app.get<{ Querystring: DeviceQuery }>("/api/v1/stats", async (request, reply) =>
 app.get<{ Querystring: DeviceQuery & { from?:string; to?:string } }>("/api/v1/export/telemetry.csv", async (request,reply) => {
   const to=request.query.to?new Date(request.query.to):new Date();
   const from=request.query.from?new Date(request.query.from):new Date(to.getTime()-86_400_000);
-  const device = resolveDevice(request.query.device);
-  const points=databaseReady && device?await getSamples(device.id,from,to,100_000):[];
-  const filename = device ? `flowmetrics-${device.vendorDeviceId}.csv` : "flowmetrics-telemetry.csv";
+  const combined = wantsCombined(request.query.device);
+  const device = combined ? undefined : resolveDevice(request.query.device);
+  const points = !databaseReady ? []
+    : combined ? combineSeries(await Promise.all(allDeviceIds().map(id => getSamples(id, from, to, 100_000))), capacityOf, expectedIntervalSeconds)
+    : device ? await getSamples(device.id, from, to, 100_000) : [];
+  const filename = combined ? "flowmetrics-all-batteries.csv" : device ? `flowmetrics-${device.vendorDeviceId}.csv` : "flowmetrics-telemetry.csv";
   reply.header("Content-Type","text/csv").header("Content-Disposition",`attachment; filename=${filename}`);
   return ["observed_at,battery_soc_pct,solar_input_w,grid_input_w,battery_charge_power_w,battery_discharge_power_w,total_output_w",...points.map(p=>[p.observedAt.toISOString(),p.batterySocPct,p.solarInputW,p.gridInputW,p.batteryChargePowerW,p.batteryDischargePowerW,p.totalOutputW].join(","))].join("\n");
 });

@@ -33,9 +33,10 @@ Leave `ECOFLOW_SERIAL_NUMBER` empty and every device bound to the account is
 recorded. Each gets its own device row, its own history, its own event detector
 and its own tile in the dashboard's device switcher.
 
-Totals are deliberately **not** summed across packs. A combined state of charge
-would be meaningless, and silently aggregating two independent batteries into one
-"home" figure is exactly the kind of invented measurement this project avoids.
+Per-battery tracking is the default and nothing is silently merged. A combined
+site view is available as an explicit choice — see below for exactly which
+quantities can be combined honestly and which are left out.
+
 Set a comma-separated list to record only some of them:
 
 ```bash
@@ -44,6 +45,25 @@ ECOFLOW_SERIAL_NUMBER=R331XXXXXXXXXXXX,R331YYYYYYYYYYYY
 
 One unreachable device does not stop the others being recorded; the connector
 reports `degraded` and names which device failed.
+
+### Combined view
+
+With more than one battery the dashboard offers an **All batteries** view, also
+available on the API as `?device=all`. What is and is not combined:
+
+| Quantity | Combined how |
+|---|---|
+| Power, energy | Summed — these are additive |
+| State of charge | Weighted by usable capacity, never averaged. Two packs at 50% and 100% of different sizes are not "75% full" |
+| Temperature | Hottest pack, so one hot battery is not averaged away |
+| Grid voltage / frequency | Property of the shared supply, not summed |
+| Online | Only online when every battery is |
+| Peaks, SOC extremes | **Omitted.** Two batteries peaking at different moments never produced the sum of their peaks, and the true combined peak cannot be recovered from pre-aggregated daily rows |
+| Coverage | The worst-covered battery |
+
+A time bucket appears in the combined history only when **every** battery
+reported in it. Summing a subset would understate site power and corrupt energy
+totals, so a gap in one battery becomes a gap for the site.
 
 ## Verifying before you start the stack
 
@@ -127,6 +147,38 @@ Stored per sample in `telemetry_samples.quality_flags`:
 | 2 | SOC came from an integer field only |
 | 4 | Solar attribution unverified (no charge-type field) |
 | 8 | Battery power derived from input/output totals, not read from the BMS |
+| 16 | Repeated reading — identical to the previous poll (see reporting cadence below) |
+| 32 | Combined view: not every battery contributed a value |
+| 64 | Combined view: a capacity was unknown, so SOC is an unweighted mean |
+
+### Reporting cadence: the cloud is not live
+
+EcoFlow's HTTP API serves **the device's last reported state**, not a live read.
+An idle DELTA 2 can go many minutes without reporting, and opening the EcoFlow
+mobile app is what prompts a fresh report.
+
+Measured on real hardware: 185 polls at 30-second intervals produced only 13
+distinct readings, including one stretch where 59 consecutive polls returned
+byte-identical values across 29 minutes. `GET /device/quota/all` and
+`POST /device/quota` were compared side by side and returned identical values
+every time, so there is no HTTP way to force a fresh read — both endpoints read
+the same server-side cache.
+
+Consequences, and how FlowMetrics handles them:
+
+- `observedAt` is when FlowMetrics polled, **not** when the device measured.
+  A poll that returns an unchanged payload is flagged `REPEATED_READING` (16),
+  and the dashboard shows when the device last reported a *change* rather than
+  when it was last polled.
+- Energy integration over a flat stretch is only correct if the power really was
+  constant. It cannot be distinguished from a device that simply went quiet, so
+  treat totals across long repeated stretches as approximate.
+- Polling faster does not help; it returns the same cached report more often.
+  `ECOFLOW_POLL_INTERVAL_MS` is a latency setting, not a resolution setting.
+- MQTT (`/open/${certificateAccount}/${sn}/quota`) would deliver each report the
+  moment the device publishes, removing poll latency and API load. It does not
+  make the device report more often. The certificate endpoint is implemented in
+  the client; the subscription is not.
 
 ### Offline devices leave gaps
 

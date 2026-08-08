@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { DiscoveredDevice, EnergyConnector, TelemetryHandler } from "../core/index";
 import { DEFAULT_ECOFLOW_HOST, EcoFlowClient, type EcoFlowDeviceListEntry } from "./ecoflow-client";
-import { deriveCapabilities, deriveCapacityWh, mapDelta2Quota } from "./ecoflow-delta2-mapping";
+import { deriveCapabilities, deriveCapacityWh, mapDelta2Quota, QUALITY_FLAGS, telemetrySignature } from "./ecoflow-delta2-mapping";
 
 export { DEFAULT_ECOFLOW_HOST } from "./ecoflow-client";
 
@@ -55,6 +55,8 @@ export class EcoFlowConnector implements EnergyConnector {
 
   /** Serial -> last known online state. Populated from the device-list endpoint. */
   private targets = new Map<string, boolean | undefined>();
+  /** Serial -> fingerprint of the last reading, to spot re-served cloud reports. */
+  private signatures = new Map<string, string>();
   private deviceListCheckedAt = 0;
 
   constructor(
@@ -218,6 +220,14 @@ export class EcoFlowConnector implements EnergyConnector {
             online,
             includeRaw: this.config.includeRaw,
           });
+
+          // EcoFlow serves the device's last reported state. When nothing has
+          // changed the device simply has not reported again, so the sample is
+          // marked as a repeat rather than passed off as a fresh measurement.
+          const signature = telemetrySignature(sample);
+          if (this.signatures.get(sn) === signature) sample.qualityFlags |= QUALITY_FLAGS.REPEATED_READING;
+          this.signatures.set(sn, signature);
+
           await onTelemetry(sample);
           this.lastTelemetryAt = sample.observedAt;
           delivered++;

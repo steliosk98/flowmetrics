@@ -3,7 +3,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   batteryLabel, EVENT_LABELS, eventKind, formatClock, formatDuration, formatKwh, formatPct,
-  formatCount, formatRelative, formatWatts, toNum, useJson, useLiveFeed, withDevice,
+  formatCount, formatRelative, formatWatts, toNum, useJson, useLiveFeed, useNow, withDevice,
+  combineLiveSamples, COMBINED_DEVICE_ID,
   type DailyRow, type DeviceSummary, type EventRow, type Numeric, type Sample, type SampleMap, type StatsResponse, type StatusResponse,
 } from "./use-flowmetrics-data";
 
@@ -113,10 +114,12 @@ function SocChart({ points }: { points: Sample[] }) {
  */
 function BatteryStrip() {
   const { devices, samples, deviceId, setDeviceId } = useDashboard();
-  if (devices.length < 2) return null;
+  const batteries = devices.filter(d => !d.combined);
+  if (batteries.length < 2) return null;
+  const combinedSelected = deviceId === COMBINED_DEVICE_ID;
 
   return <section className="battery-strip" aria-label="All batteries">
-    {devices.map(device => {
+    {batteries.map(device => {
       const sample = samples[device.id];
       const online = sample?.deviceOnline ?? device.online ?? undefined;
       const soc = sample?.batterySocPct ?? device.batterySocPct ?? undefined;
@@ -128,7 +131,7 @@ function BatteryStrip() {
       return <button
         key={device.id}
         type="button"
-        className={`battery-chip panel${selected ? " selected" : ""}`}
+        className={`battery-chip panel${selected ? " selected" : ""}${combinedSelected ? " dimmed" : ""}`}
         aria-pressed={selected}
         onClick={() => setDeviceId(device.id)}
       >
@@ -152,8 +155,9 @@ function BatteryStrip() {
 }
 
 function Overview() {
-  const { deviceId, connected, reloadToken } = useDashboard();
+  const { deviceId, connected, reloadToken, devices } = useDashboard();
   const sample = useSample(deviceId);
+  const device = devices.find(d => d.id === deviceId);
   const summary = useJson<DailyRow>(withDevice("/api/v1/summary", deviceId), 60_000, reloadToken);
   const history = useJson<{ points: Sample[] }>(withDevice("/api/v1/history", deviceId), 120_000, reloadToken);
   const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000, reloadToken);
@@ -201,11 +205,22 @@ function Overview() {
           <div className="flow-node load-node"><div className="flow-anchor"><MiniIcon name="load"/></div><div className="flow-copy"><strong>{formatWatts(sample?.totalOutputW)}</strong><span>Home load</span></div></div>
           <div className="flow-node grid-node"><div className="flow-anchor"><MiniIcon name="grid"/></div><div className="flow-copy"><strong>{formatWatts(sample?.gridInputW)}</strong><span>Grid</span></div></div>
         </div>
-        <div className="live-foot"><span><StatusDot warn={sample?.deviceOnline === false}/> {sample ? (sample.deviceOnline === false ? "Device is offline" : "Device is online") : "Waiting for the first measurement"}</span><span>{sample ? `Updated ${formatRelative(sample.observedAt)}` : "—"}</span></div>
+        {/* observedAt is when we polled. EcoFlow re-serves an idle battery's last
+            report, so the device's own last change is shown instead — that is the
+            figure that says how current these numbers really are. */}
+        <div className="live-foot">
+          <span><StatusDot warn={sample?.deviceOnline === false}/> {sample ? (sample.deviceOnline === false ? "Device is offline" : "Device is online") : "Waiting for the first measurement"}</span>
+          <span title="EcoFlow reports on the device's own schedule; this is when its readings last changed.">
+            {device?.lastChangedAt ? `Device reported ${formatRelative(device.lastChangedAt)}` : sample ? `Polled ${formatRelative(sample.observedAt)}` : "—"}
+          </span>
+        </div>
       </div>
       <div className="impact-card panel">
         <p className="eyebrow">TODAY&apos;S INPUT MIX</p>
-        <div className="mix-donut"><div><strong>{formatPct(solarShare)}</strong><span>solar</span></div></div>
+        {/* The ring is driven by the measured share; with no input energy it stays neutral. */}
+        <div className={`mix-donut${solarShare === undefined ? " no-input" : ""}`} style={{ "--solar-share": `${solarShare ?? 0}%` } as React.CSSProperties}>
+          <div><strong>{formatPct(solarShare)}</strong><span>solar</span></div>
+        </div>
         <div className="mix-legend"><span><i className="solar-key"/>Solar <b>{formatKwh(solarWh)} kWh</b></span><span><i className="grid-key"/>Grid <b>{formatKwh(gridWh)} kWh</b></span></div>
         <div className="impact-message"><MiniIcon name="leaf"/><span>
           {solarShare === undefined
@@ -473,19 +488,44 @@ export function FlowMetricsApp() {
   const deviceList = useJson<DeviceSummary[]>("/api/v1/devices", 30_000, reloadToken);
   const status = useJson<StatusResponse>("/api/v1/status", 30_000, reloadToken);
   const devices = useMemo(() => deviceList.data ?? [], [deviceList.data]);
-  const deviceId = selected ?? devices[0]?.id;
+  const batteries = useMemo(() => devices.filter(d => !d.combined), [devices]);
+  const deviceId = selected ?? batteries[0]?.id;
   const device = devices.find(d => d.id === deviceId);
 
   // One stream for the whole dashboard, covering every battery.
-  const deviceIds = useMemo(() => devices.map(d => d.id), [devices]);
+  const deviceIds = useMemo(() => batteries.map(d => d.id), [batteries]);
   const { samples, connected } = useLiveFeed(deviceIds, reloadToken);
-  const sample = deviceId ? samples[deviceId] : undefined;
+
+  const capacityOf = useCallback(
+    (id: string) => batteries.find(d => d.id === id)?.capacityWh ?? undefined,
+    [batteries],
+  );
+
+  // The combined reading is derived from the same stream, so it stays live.
+  const combinedSample = useMemo(
+    () => combineLiveSamples(batteries.map(d => samples[d.id]).filter((x): x is Sample => !!x), capacityOf, batteries.length),
+    [batteries, samples, capacityOf],
+  );
+  const isCombined = deviceId === COMBINED_DEVICE_ID;
+  const sample = isCombined ? combinedSample : deviceId ? samples[deviceId] : undefined;
+
+  const liveSamples = useMemo<SampleMap>(
+    () => (combinedSample ? { ...samples, [COMBINED_DEVICE_ID]: combinedSample } : samples),
+    [samples, combinedSample],
+  );
 
   const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000, reloadToken);
   const mode = status.data?.mode;
   const today = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   const soc = sample?.batterySocPct ?? device?.batterySocPct ?? undefined;
   const warningCount = (events.data ?? []).filter(e => e.severity === "warning").length;
+
+  // EcoFlow re-serves an idle battery's last report, so "polled just now" is not
+  // the same as "measured just now". Surface the device's own freshness.
+  const changedAt = device?.lastChangedAt;
+  const now = useNow(30_000);
+  const staleSeconds = changedAt ? (now - new Date(changedAt).getTime()) / 1000 : undefined;
+  const stale = staleSeconds !== undefined && staleSeconds > 180;
 
   const reload = deviceList.reload;
   const refresh = useCallback(() => {
@@ -501,8 +541,8 @@ export function FlowMetricsApp() {
   const content = useMemo(() => ({ Overview: <Overview/>, History: <History/>, Events: <Events/>, Devices: <Devices/>, Data: <DataPage/>, Settings: <Settings/>, About: <About/> })[active], [active]);
 
   const value = useMemo<DashboardValue>(
-    () => ({ deviceId, setDeviceId: setSelected, devices, samples, connected, reloadToken, refresh, refreshing }),
-    [deviceId, devices, samples, connected, reloadToken, refresh, refreshing],
+    () => ({ deviceId, setDeviceId: setSelected, devices, samples: liveSamples, connected, reloadToken, refresh, refreshing }),
+    [deviceId, devices, liveSamples, connected, reloadToken, refresh, refreshing],
   );
 
   return <DashboardContext.Provider value={value}>
@@ -530,8 +570,13 @@ export function FlowMetricsApp() {
           <button className="mobile-menu" onClick={()=>setMenu(!menu)} aria-label="Toggle navigation">☰</button>
           <div><p>{active === "Overview" ? today : active}</p><span>{active === "Overview" ? (devices.length > 1 && device ? `${device.name} — a clear view of your home energy.` : "A clear view of your home energy.") : "FlowMetrics energy historian"}</span></div>
           <div className="top-actions">
-            <span className={`feed-state${connected ? " live" : ""}`} title={connected ? "Live stream connected" : "Stream disconnected — polling instead"}>
-              <StatusDot warn={!connected}/>{connected ? "Live" : "Polling"}
+            <span
+              className={`feed-state${connected && !stale ? " live" : ""}`}
+              title={!connected ? "Stream disconnected — polling instead"
+                : stale ? `The battery last reported a change ${formatRelative(changedAt)}. EcoFlow serves its last report until the device sends a new one.`
+                : "Live stream connected"}
+            >
+              <StatusDot warn={!connected || stale}/>{!connected ? "Polling" : stale ? "Stale" : "Live"}
             </span>
             <button className={`round-button refresh${refreshing ? " busy" : ""}`} onClick={refresh} disabled={refreshing} aria-label="Refresh feed" title="Refresh feed">
               <span className="icon" aria-hidden="true">⟳</span>

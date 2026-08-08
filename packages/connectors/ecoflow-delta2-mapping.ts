@@ -23,6 +23,14 @@ export const QUALITY_FLAGS = {
   SOLAR_ATTRIBUTION_UNVERIFIED: 1 << 2,
   /** Battery power was derived from the input/output totals, not read from the BMS. */
   BATTERY_POWER_DERIVED: 1 << 3,
+  /**
+   * Every measured field is byte-identical to the previous poll. EcoFlow's cloud
+   * serves the device's last reported state, and an idle DELTA 2 can go many
+   * minutes between reports, so this marks a reading that was re-read rather
+   * than re-measured. `observedAt` is when we polled, not when the device
+   * measured; only unflagged samples represent a fresh observation.
+   */
+  REPEATED_READING: 1 << 4,
 } as const;
 
 /**
@@ -208,6 +216,21 @@ export function mapDelta2Quota(quota: EcoFlowQuota, options: MapOptions): Normal
     qualityFlags,
     raw: options.includeRaw ? quota : undefined,
   };
+}
+
+/**
+ * Stable fingerprint of everything measured in a sample, ignoring the clock.
+ * Two consecutive samples with the same signature mean the cloud served the same
+ * device report twice — not that two identical measurements were taken.
+ */
+export function telemetrySignature(sample: NormalizedTelemetry): string {
+  return [
+    sample.batterySocPct, sample.batteryChargePowerW, sample.batteryDischargePowerW,
+    sample.solarInputW, sample.solarInput1W, sample.solarInput2W,
+    sample.gridInputW, sample.gridVoltageV, sample.gridFrequencyHz,
+    sample.acOutputW, sample.dcOutputW, sample.totalOutputW,
+    sample.batteryTemperatureC, sample.inverterTemperatureC, sample.batterySohPct,
+  ].map(v => v === undefined ? "" : String(v)).join("|");
 }
 
 /**
