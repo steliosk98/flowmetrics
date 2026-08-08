@@ -118,13 +118,13 @@ function Overview() {
       <div className="live-card panel">
         <div className="section-heading"><div><p className="eyebrow">LIVE POWER FLOW</p><h2>Right now</h2></div><div className="live-pill"><StatusDot /> Live</div></div>
         <div className="flow-stage">
-          <div className="flow-node solar-node"><MiniIcon name="sun"/><strong>843 W</strong><span>Solar</span></div>
+          <div className="flow-node solar-node"><div className="flow-anchor"><MiniIcon name="sun"/></div><div className="flow-copy"><strong>843 W</strong><span>Solar</span></div></div>
           <div className="flow-line line-a"><i /></div>
-          <div className="flow-node battery-node"><div className="battery-ring"><strong>73%</strong></div><span>Battery</span><small>326 W charging</small></div>
+          <div className="flow-node battery-node"><div className="flow-anchor battery-ring"><strong>73%</strong></div><div className="flow-copy"><span>Battery</span><small>326 W charging</small></div></div>
           <div className="flow-line line-b"><i /></div>
-          <div className="flow-node load-node"><MiniIcon name="load"/><strong>491 W</strong><span>Home load</span></div>
+          <div className="flow-node load-node"><div className="flow-anchor"><MiniIcon name="load"/></div><div className="flow-copy"><strong>491 W</strong><span>Home load</span></div></div>
           <div className="flow-line line-c"><i /></div>
-          <div className="flow-node grid-node"><MiniIcon name="grid"/><strong>0 W</strong><span>Grid</span></div>
+          <div className="flow-node grid-node"><div className="flow-anchor"><MiniIcon name="grid"/></div><div className="flow-copy"><strong>0 W</strong><span>Grid</span></div></div>
         </div>
         <div className="live-foot"><span><StatusDot/> Delta 2 Max is online</span><span>Updated 8 sec ago</span></div>
       </div>

@@ -51,50 +51,113 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
 .settings-layout{display:grid;grid-template-columns:220px 1fr;gap:17px}.settings-nav{padding:8px;height:max-content;display:grid;gap:3px}.settings-nav button{border:0;background:none;text-align:left;padding:10px;border-radius:7px;font-size:9px;color:var(--muted)}.settings-nav button.active{background:var(--green-soft);color:var(--green-dark);font-weight:700}.settings-form{padding:26px;display:grid;gap:18px}.settings-form h2{margin:0;border-bottom:1px solid var(--line);padding-bottom:15px}.settings-form label{font-size:9px;font-weight:700}.settings-form input,.settings-form select{display:block;width:100%;border:1px solid var(--line);background:var(--panel-soft);color:var(--text);border-radius:8px;padding:10px;margin-top:7px;font-size:10px}.setting-toggle{display:flex;justify-content:space-between;align-items:center;padding:13px 0;border-top:1px solid var(--line)}.setting-toggle b,.setting-toggle small{display:block;font-size:9px}.setting-toggle small{color:var(--muted);margin-top:4px;font-weight:400}.setting-toggle button{width:34px;height:19px;border:0;border-radius:20px;background:var(--line);padding:2px}.setting-toggle button i{display:block;width:15px;height:15px;border-radius:50%;background:white}.setting-toggle button.on{background:var(--green)}.setting-toggle button.on i{margin-left:auto}.settings-form>.primary-button{justify-self:start}
 .about-page{max-width:760px;margin:65px auto;text-align:center}.about-mark{width:78px;height:78px;border-radius:25px;background:var(--green-soft);color:var(--green);font-size:35px;display:grid;place-items:center;margin:0 auto 25px;position:relative}.about-mark i{position:absolute;width:8px;height:8px;border-radius:50%;background:var(--solar);right:10px;top:10px}.about-page h1{font-size:44px;letter-spacing:-2px;margin:10px 0 15px}.about-lead{font-size:14px;line-height:1.8;color:var(--muted);max-width:650px;margin:auto}.about-values{display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin:35px 0}.about-values div{padding:20px;background:var(--panel);border:1px solid var(--line);border-radius:13px;text-align:left}.about-values b{display:block}.about-values span{font-size:9px;color:var(--muted);line-height:1.5;display:block;margin-top:7px}.about-page>a{color:var(--green);font-weight:700;text-decoration:none;font-size:11px}
 
-/* Keep power-flow paths short, contained, and visually attached to their nodes. */
-.flow-stage { isolation: isolate; }
-.flow-node { position: relative; z-index: 3; }
-.flow-line {
-  z-index: 1;
+/* A true center-to-center network. Anchors define the geometry; paths fill the
+   exact rectangle between them, so alignment stays correct at every width. */
+.flow-stage {
+  display: block;
+  isolation: isolate;
   overflow: hidden;
-  border-radius: 999px;
-  transform-origin: left center;
-  background: color-mix(in srgb, var(--line) 78%, var(--green) 22%);
+}
+.flow-node {
+  position: absolute;
+  z-index: 3;
+  width: 124px;
+  transform: translateX(-50%);
+  text-align: center;
+}
+.flow-anchor {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 50%;
+  width: 42px;
+  height: 42px;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 21px;
+}
+.flow-copy {
+  position: relative;
+  z-index: 3;
+  width: max-content;
+  min-width: 76px;
+  margin: 0 auto;
+  padding: 27px 5px 2px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+.flow-copy strong { display: block; font-size: 18px; line-height: 1.1; }
+.flow-copy span { display: block; color: var(--muted); font-size: 9px; margin-top: 5px; }
+.flow-copy small { display: block; color: var(--green); font-size: 8px; margin-top: 4px; }
+.solar-node { left: 16.667%; top: 25%; }
+.battery-node { left: 50%; top: 55%; }
+.load-node { left: 83.333%; top: 25%; }
+.grid-node { left: 83.333%; top: 78%; }
+.solar-node .flow-anchor { background: var(--solar-soft); color: #d79b23; }
+.load-node .flow-anchor { background: #fff0eb; color: var(--load); }
+.grid-node .flow-anchor { background: var(--grid-soft); color: var(--grid); }
+.battery-node .flow-copy { padding-top: 55px; }
+.battery-node .battery-ring {
+  width: 94px;
+  height: 94px;
+  margin: 0;
+  background: conic-gradient(var(--battery) 0 73%, var(--line) 73%);
+}
+.battery-node .battery-ring::before { content: ""; position: absolute; inset: 8px; border-radius: 50%; background: var(--panel); }
+.battery-node .battery-ring strong { position: relative; z-index: 1; font-size: 25px; }
+
+.flow-line {
+  position: absolute;
+  z-index: 1;
+  height: auto;
+  overflow: hidden;
+  transform: none;
+  background: none;
+}
+.flow-line::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: .9;
 }
 .flow-line i {
-  width: 34%;
-  height: 2px;
-  margin-top: 0;
-  border-radius: inherit;
-  background: linear-gradient(90deg, transparent, var(--green), transparent);
-  animation: flow-contained 2.6s linear infinite;
+  position: absolute;
+  z-index: 2;
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border-radius: 999px;
+  background: radial-gradient(circle, var(--green) 0 2px, color-mix(in srgb, var(--green) 48%, transparent) 3px, transparent 8px);
+  box-shadow: none;
 }
-.line-a {
-  left: 23%;
-  top: 33%;
-  width: 22%;
-  transform: rotate(28deg);
-}
-.line-b {
-  left: 57%;
-  top: 43%;
-  width: 22%;
-  transform: rotate(-28deg);
-}
-.line-b i { animation-delay: -1.3s; }
+/* Solar center (16.667%,25%) to battery center (50%,55%). */
+.line-a { left: 16.667%; top: 25%; width: 33.333%; height: 30%; }
+.line-a::before { background: linear-gradient(to bottom left, transparent calc(50% - 1px), color-mix(in srgb, var(--line) 55%, var(--green) 45%) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); }
+.line-a i { animation: flow-down-right 2.6s linear infinite; }
+/* Battery center (50%,55%) to load center (83.333%,25%). */
+.line-b { left: 50%; top: 25%; width: 33.333%; height: 30%; }
+.line-b::before { background: linear-gradient(to bottom right, transparent calc(50% - 1px), color-mix(in srgb, var(--line) 55%, var(--green) 45%) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); }
+.line-b i { animation: flow-up-right 2.6s linear infinite -1.3s; }
+/* Load center to grid center. Zero watts stays clearly connected but inactive. */
 .line-c {
-  left: calc(83.333% - .5px);
-  top: 41%;
-  width: 1px;
-  height: 18%;
-  transform: none;
-  overflow: visible;
-  background: repeating-linear-gradient(to bottom, var(--line) 0 4px, transparent 4px 8px);
+  left: calc(83.333% - 1px);
+  top: 25%;
+  width: 2px;
+  height: 53%;
+  overflow: hidden;
 }
+.line-c::before { background: repeating-linear-gradient(to bottom, color-mix(in srgb, var(--line) 82%, var(--grid) 18%) 0 5px, transparent 5px 9px); }
 .line-c i { display: none; }
-@keyframes flow-contained {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(300%); }
+@keyframes flow-down-right {
+  from { left: -9px; top: -9px; }
+  to { left: calc(100% - 9px); top: calc(100% - 9px); }
+}
+@keyframes flow-up-right {
+  from { left: -9px; top: calc(100% - 9px); }
+  to { left: calc(100% - 9px); top: -9px; }
 }
 
 @media(max-width:1100px){.metric-grid{grid-template-columns:1fr 1fr}.hero-grid,.two-col,.device-grid{grid-template-columns:1fr}.history-summary,.export-grid{grid-template-columns:1fr 1fr}.impact-card{min-height:300px}.data-health{grid-template-columns:repeat(3,1fr)}.data-health div:nth-child(3){border-right:0}}
