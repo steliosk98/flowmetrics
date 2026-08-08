@@ -2,7 +2,7 @@ import { integrateTelemetry, type NormalizedTelemetry } from "../packages/core/i
 import { pool } from "./db";
 
 type TelemetryRow = Record<string, unknown>;
-function rowToSample(row: TelemetryRow): NormalizedTelemetry {
+export function rowToSample(row: TelemetryRow): NormalizedTelemetry {
   return {
     deviceId: String(row.device_id), observedAt: new Date(String(row.observed_at)), receivedAt: new Date(String(row.received_at)),
     batterySocPct: row.battery_soc_pct == null ? undefined : Number(row.battery_soc_pct), batteryPowerW: row.battery_power_w == null ? undefined : Number(row.battery_power_w),
@@ -10,6 +10,10 @@ function rowToSample(row: TelemetryRow): NormalizedTelemetry {
     solarInputW: row.solar_input_w == null ? undefined : Number(row.solar_input_w), gridInputW: row.grid_input_w == null ? undefined : Number(row.grid_input_w),
     acOutputW: row.ac_output_w == null ? undefined : Number(row.ac_output_w), dcOutputW: row.dc_output_w == null ? undefined : Number(row.dc_output_w), totalOutputW: row.total_output_w == null ? undefined : Number(row.total_output_w),
     batteryTemperatureC: row.battery_temperature_c == null ? undefined : Number(row.battery_temperature_c), inverterTemperatureC: row.inverter_temperature_c == null ? undefined : Number(row.inverter_temperature_c),
+    solarInput1W: row.solar_input_1_w == null ? undefined : Number(row.solar_input_1_w), solarInput2W: row.solar_input_2_w == null ? undefined : Number(row.solar_input_2_w),
+    gridVoltageV: row.grid_voltage_v == null ? undefined : Number(row.grid_voltage_v), gridFrequencyHz: row.grid_frequency_hz == null ? undefined : Number(row.grid_frequency_hz),
+    gridConnected: row.grid_connected == null ? undefined : Boolean(row.grid_connected), batterySohPct: row.battery_soh_pct == null ? undefined : Number(row.battery_soh_pct),
+    cycleCount: row.cycle_count == null ? undefined : Number(row.cycle_count),
     deviceOnline: row.device_online == null ? undefined : Boolean(row.device_online), qualityFlags: Number(row.quality_flags ?? 0),
   };
 }
@@ -17,18 +21,20 @@ function rowToSample(row: TelemetryRow): NormalizedTelemetry {
 export async function getSamples(deviceId: string, from: Date, to: Date, maxPoints = 3000) {
   const count = await pool.query<{ count: string }>("SELECT count(*) FROM telemetry_samples WHERE device_id=$1 AND observed_at BETWEEN $2 AND $3", [deviceId, from, to]);
   const stride = Math.max(1, Math.ceil(Number(count.rows[0].count) / maxPoints));
-  const rows = await pool.query(`SELECT * FROM (SELECT *,row_number() OVER (ORDER BY observed_at) AS rn FROM telemetry_samples WHERE device_id=$1 AND observed_at BETWEEN $2 AND $3) s WHERE rn % $4 = 1 OR rn = 1 ORDER BY observed_at`, [deviceId, from, to, stride]);
+  // `rn % 1` is always 0, so a stride of 1 must short-circuit to "keep every row" —
+  // otherwise only rn = 1 matches and the whole range collapses to a single sample.
+  const rows = await pool.query(`SELECT * FROM (SELECT *,row_number() OVER (ORDER BY observed_at) AS rn FROM telemetry_samples WHERE device_id=$1 AND observed_at BETWEEN $2 AND $3) s WHERE $4 <= 1 OR rn % $4 = 1 ORDER BY observed_at`, [deviceId, from, to, stride]);
   return rows.rows.map(rowToSample);
 }
 
-export async function rebuildDay(deviceId: string, day: Date) {
+export async function rebuildDay(deviceId: string, day: Date, expectedIntervalSeconds = 10) {
   const device = await pool.query<{ timezone: string; capacity_wh: number | null }>("SELECT timezone,capacity_wh FROM devices WHERE id=$1", [deviceId]);
   if (!device.rowCount) return;
   const timezone = device.rows[0].timezone;
   const start = new Date(day); start.setUTCHours(0,0,0,0); const end = new Date(start.getTime() + 86_400_000);
   const samples = await getSamples(deviceId, start, end, Number.MAX_SAFE_INTEGER);
   if (samples.length < 2) return;
-  const integrated = integrateTelemetry(samples);
+  const integrated = integrateTelemetry(samples, { expectedIntervalSeconds });
   const peak = (field: keyof NormalizedTelemetry) => samples.reduce((best, sample) => Number(sample[field] ?? 0) > Number(best[field] ?? 0) ? sample : best, samples[0]);
   const socSamples = samples.filter(sample => sample.batterySocPct != null);
   const minSoc = socSamples.reduce((a,b) => a.batterySocPct! < b.batterySocPct! ? a : b, socSamples[0]); const maxSoc = socSamples.reduce((a,b) => a.batterySocPct! > b.batterySocPct! ? a : b, socSamples[0]);

@@ -48,7 +48,21 @@ See [calculations](docs/calculations.md), [data model](docs/data-model.md), and 
 
 ## EcoFlow status
 
-No EcoFlow endpoint, header, signature, MQTT topic, or payload field is guessed. The connector boundary and encrypted configuration storage exist, but live EcoFlow transport is intentionally disabled until current official documentation and authorized fixture payloads can be verified. See [EcoFlow support](docs/ecoflow.md).
+Live EcoFlow telemetry is implemented for **DELTA 2 and DELTA 2 Max**, built only from the official IoT Open Platform documentation — no endpoint, header, signature, or payload field is guessed. EcoFlow publishes a worked signing example; that exact vector is asserted in the test suite, so the auth contract cannot drift silently.
+
+```bash
+CONNECTOR=ecoflow
+ECOFLOW_ACCESS_KEY=...      # from https://developer-eu.ecoflow.com
+ECOFLOW_SECRET_KEY=...
+```
+
+Verify credentials and see what your hardware actually reports before starting the stack:
+
+```bash
+node scripts/ecoflow-probe.mjs
+```
+
+Other EcoFlow models authenticate fine but report different quota keys and need their own mapping module. See [EcoFlow support](docs/ecoflow.md).
 
 ## Backup
 
