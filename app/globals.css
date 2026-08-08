@@ -55,6 +55,7 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
    exact rectangle between them, so alignment stays correct at every width. */
 .flow-stage {
   display: block;
+  height: 235px;
   isolation: isolate;
   overflow: hidden;
 }
@@ -94,7 +95,7 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
 .solar-node { left: 16.667%; top: 25%; }
 .battery-node { left: 50%; top: 55%; }
 .load-node { left: 83.333%; top: 25%; }
-.grid-node { left: 83.333%; top: 78%; }
+.grid-node { left: 83.333%; top: 70%; }
 .solar-node .flow-anchor { background: var(--solar-soft); color: #d79b23; }
 .load-node .flow-anchor { background: #fff0eb; color: var(--load); }
 .grid-node .flow-anchor { background: var(--grid-soft); color: var(--grid); }

@@ -127,7 +127,7 @@ function Overview() {
               <line className="flow-link-base" x1="500" y1="550" x2="833.33" y2="250" vectorEffect="non-scaling-stroke" />
               <line className="flow-link-motion flow-link-motion-delayed" x1="500" y1="550" x2="833.33" y2="250" pathLength="100" vectorEffect="non-scaling-stroke" />
             </g>
-            <line className="flow-link-inactive" x1="833.33" y1="250" x2="833.33" y2="780" pathLength="100" vectorEffect="non-scaling-stroke" />
+            <line className="flow-link-inactive" x1="833.33" y1="250" x2="833.33" y2="700" pathLength="100" vectorEffect="non-scaling-stroke" />
           </svg>
           <div className="flow-node solar-node"><div className="flow-anchor"><MiniIcon name="sun"/></div><div className="flow-copy"><strong>843 W</strong><span>Solar</span></div></div>
           <div className="flow-node battery-node"><div className="flow-anchor battery-ring"><strong>73%</strong></div><div className="flow-copy"><span>Battery</span><small>326 W charging</small></div></div>
