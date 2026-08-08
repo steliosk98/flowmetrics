@@ -1,7 +1,9 @@
 import { z } from "zod";
+import mqtt, { type MqttClient } from "mqtt";
 import type { DiscoveredDevice, EnergyConnector, TelemetryHandler } from "../core/index";
 import { DEFAULT_ECOFLOW_HOST, EcoFlowClient, type EcoFlowDeviceListEntry } from "./ecoflow-client";
 import { deriveCapabilities, deriveCapacityWh, mapDelta2Quota, QUALITY_FLAGS, telemetrySignature } from "./ecoflow-delta2-mapping";
+import { applyMqttReport, parseStatusReport, quotaTopic, statusTopic } from "./ecoflow-mqtt";
 
 export { DEFAULT_ECOFLOW_HOST } from "./ecoflow-client";
 
@@ -28,12 +30,31 @@ export const ecoFlowConfigurationSchema = z.object({
   pollIntervalMs: z.number().int().min(5_000).max(600_000).optional(),
   deviceListRefreshMs: z.number().int().min(30_000).optional(),
   includeRaw: z.boolean().optional(),
+  /**
+   * "mqtt" subscribes to the device's own live reports; "poll" reads the HTTP
+   * cache. MQTT falls back to polling automatically if the broker is unreachable.
+   */
+  transport: z.enum(["mqtt", "poll"]).optional(),
+  /**
+   * How often a sample is recorded from the live MQTT state. The device reports
+   * roughly once a second; storing every message would be ~86k rows per battery
+   * per day, so readings are sampled at this cadence instead.
+   */
+  sampleIntervalMs: z.number().int().min(1_000).max(300_000).optional(),
 });
 
 export type EcoFlowConfiguration = z.infer<typeof ecoFlowConfigurationSchema>;
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const DEFAULT_DEVICE_LIST_REFRESH_MS = 300_000;
+const DEFAULT_SAMPLE_INTERVAL_MS = 10_000;
+
+/** Distinct client id per process; a collision would disconnect the other client. */
+function randomClientSuffix(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+/** Periodic HTTP re-seed, so a missed delta cannot drift the state indefinitely. */
+const MQTT_RESYNC_MS = 900_000;
 
 type Health = ReturnType<EnergyConnector["getHealth"]>;
 
@@ -57,6 +78,16 @@ export class EcoFlowConnector implements EnergyConnector {
   private targets = new Map<string, boolean | undefined>();
   /** Serial -> fingerprint of the last reading, to spot re-served cloud reports. */
   private signatures = new Map<string, string>();
+
+  // --- MQTT transport ---
+  private mqttClient?: MqttClient;
+  /** Serial -> live quota state, seeded from HTTP then updated by MQTT deltas. */
+  private mqttState = new Map<string, Record<string, unknown>>();
+  private mqttSampler?: ReturnType<typeof setInterval>;
+  private mqttResync?: ReturnType<typeof setInterval>;
+  private mqttConnected = false;
+  private certificateAccount?: string;
+  private onTelemetry?: TelemetryHandler;
   private deviceListCheckedAt = 0;
 
   constructor(
@@ -159,9 +190,158 @@ export class EcoFlowConnector implements EnergyConnector {
     for (const device of selected) this.applyDeviceListEntry(device);
     this.deviceListCheckedAt = Date.now();
 
-    // Poll once immediately so a misconfiguration surfaces at startup, then on interval.
+    this.onTelemetry = onTelemetry;
+
+    // Seed from HTTP either way: MQTT sends only changed fields, so a full
+    // snapshot is needed before any delta means anything.
     await this.poll(onTelemetry);
+
+    if ((this.config.transport ?? "mqtt") === "mqtt") {
+      try {
+        await this.startMqtt(onTelemetry);
+        return;
+      } catch (error) {
+        this.logger.warn(
+          { component: "ecoflow", error: (error as Error).message },
+          "MQTT unavailable; falling back to HTTP polling (data will be as stale as EcoFlow's cache)",
+        );
+      }
+    }
+
     this.schedule(onTelemetry);
+  }
+
+  /**
+   * Subscribes to the devices' own report stream.
+   *
+   * The HTTP endpoints serve the last state the device reported to EcoFlow, which
+   * for an idle DELTA 2 can be tens of minutes old. Over MQTT the same device
+   * publishes roughly once a second with no app open, so this is the only way to
+   * record what the battery is actually doing.
+   */
+  private async startMqtt(onTelemetry: TelemetryHandler): Promise<void> {
+    const certification = await this.client.getMqttCertification();
+    this.certificateAccount = certification.certificateAccount;
+
+    const url = `${certification.protocol}://${certification.url}:${certification.port}`;
+    const client = mqtt.connect(url, {
+      username: certification.certificateAccount,
+      password: certification.certificatePassword,
+      clientId: `flowmetrics-${randomClientSuffix()}`,
+      protocolVersion: 5,
+      reconnectPeriod: 5_000,
+      connectTimeout: 15_000,
+    });
+    this.mqttClient = client;
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("MQTT connect timed out")), 20_000);
+      client.once("connect", () => { clearTimeout(timer); resolve(); });
+      client.once("error", error => { clearTimeout(timer); reject(error); });
+    });
+
+    this.mqttConnected = true;
+    this.status = "healthy";
+    this.lastError = undefined;
+
+    client.on("connect", () => {
+      this.mqttConnected = true;
+      for (const sn of this.targets.keys()) this.subscribeDevice(client, sn);
+    });
+    client.on("reconnect", () => this.logger.info({ component: "ecoflow" }, "MQTT reconnecting"));
+    client.on("close", () => { this.mqttConnected = false; });
+    client.on("error", error => {
+      this.lastError = (error as Error).message;
+      this.status = "degraded";
+    });
+    client.on("message", (topic, payload) => this.handleMqttMessage(topic, payload));
+
+    for (const sn of this.targets.keys()) this.subscribeDevice(client, sn);
+
+    // Record from the live state on a fixed cadence, so energy integration sees
+    // evenly spaced samples rather than one row per MQTT message.
+    const sampleMs = this.config.sampleIntervalMs ?? DEFAULT_SAMPLE_INTERVAL_MS;
+    this.mqttSampler = setInterval(() => void this.emitFromState(onTelemetry), sampleMs);
+
+    // A dropped delta would otherwise persist in the merged state forever.
+    this.mqttResync = setInterval(() => void this.resyncFromHttp(), MQTT_RESYNC_MS);
+
+    this.logger.info(
+      { component: "ecoflow", devices: this.targets.size, sampleIntervalMs: sampleMs },
+      "MQTT transport connected",
+    );
+  }
+
+  private subscribeDevice(client: MqttClient, sn: string) {
+    const account = this.certificateAccount;
+    if (!account) return;
+    for (const topic of [quotaTopic(account, sn), statusTopic(account, sn)]) {
+      client.subscribe(topic, { qos: 0 }, error => {
+        if (error) this.logger.warn({ component: "ecoflow", topic, error: error.message }, "MQTT subscribe failed");
+      });
+    }
+  }
+
+  private handleMqttMessage(topic: string, payload: Buffer) {
+    const parts = topic.split("/");
+    const sn = parts[3];
+    const kind = parts[4];
+    if (!sn || !this.targets.has(sn)) return;
+
+    let json: unknown;
+    try { json = JSON.parse(payload.toString()); } catch { return; }
+
+    if (kind === "status") {
+      const online = parseStatusReport(json);
+      if (online !== undefined) this.targets.set(sn, online);
+      return;
+    }
+
+    const state = this.mqttState.get(sn) ?? {};
+    if (applyMqttReport(state, json)) this.mqttState.set(sn, state);
+  }
+
+  /** Records the current merged state for every device as one sample each. */
+  private async emitFromState(onTelemetry: TelemetryHandler) {
+    for (const [sn, online] of this.targets) {
+      // A device that is known-offline is not measuring; leave a real gap.
+      if (online === false) continue;
+      const state = this.mqttState.get(sn);
+      if (!state || !Object.keys(state).length) continue;
+
+      try {
+        const sample = mapDelta2Quota(state, {
+          deviceId: sn,
+          observedAt: new Date(),
+          online,
+          includeRaw: this.config.includeRaw,
+        });
+        const signature = telemetrySignature(sample);
+        if (this.signatures.get(sn) === signature) sample.qualityFlags |= QUALITY_FLAGS.REPEATED_READING;
+        this.signatures.set(sn, signature);
+
+        await onTelemetry(sample);
+        this.lastTelemetryAt = sample.observedAt;
+        this.status = this.mqttConnected ? "healthy" : "degraded";
+      } catch (error) {
+        this.logger.warn({ component: "ecoflow", sn, error: (error as Error).message }, "failed to record MQTT sample");
+      }
+    }
+  }
+
+  /** Re-reads the full snapshot over HTTP so the merged state cannot drift. */
+  private async resyncFromHttp() {
+    for (const sn of this.targets.keys()) {
+      try {
+        const quota = await this.client.getAllQuota(sn);
+        // HTTP is authoritative for fields MQTT has not sent recently, but any
+        // field MQTT has already delivered is fresher, so deltas win.
+        const state = this.mqttState.get(sn) ?? {};
+        this.mqttState.set(sn, { ...quota, ...state });
+      } catch (error) {
+        this.logger.warn({ component: "ecoflow", sn, error: (error as Error).message }, "MQTT resync failed");
+      }
+    }
   }
 
   /** Serials this connector is collecting, in device-list order. */
@@ -214,6 +394,8 @@ export class EcoFlowConnector implements EnergyConnector {
 
         try {
           const quota = await this.client.getAllQuota(sn);
+          // Seed the MQTT baseline; deltas are merged on top of this.
+          this.mqttState.set(sn, { ...quota });
           const sample = mapDelta2Quota(quota, {
             deviceId: sn,
             observedAt: new Date(),
@@ -269,8 +451,22 @@ export class EcoFlowConnector implements EnergyConnector {
   async stop(): Promise<void> {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
+    if (this.mqttSampler) clearInterval(this.mqttSampler);
+    if (this.mqttResync) clearInterval(this.mqttResync);
     this.timer = undefined;
+    this.mqttSampler = undefined;
+    this.mqttResync = undefined;
+    if (this.mqttClient) {
+      await new Promise<void>(resolve => this.mqttClient?.end(true, {}, () => resolve()));
+      this.mqttClient = undefined;
+    }
+    this.mqttConnected = false;
     this.status = "stopped";
+  }
+
+  /** Which transport is actually carrying data right now. */
+  get activeTransport(): "mqtt" | "poll" {
+    return this.mqttClient && this.mqttConnected ? "mqtt" : "poll";
   }
 
   getHealth(): Health {

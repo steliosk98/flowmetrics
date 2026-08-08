@@ -65,6 +65,8 @@ export function buildConnector(
         serialNumbers,
         host: env.ECOFLOW_HOST?.trim() || undefined,
         pollIntervalMs,
+        transport: env.ECOFLOW_TRANSPORT?.trim().toLowerCase() === "poll" ? "poll" : "mqtt",
+        sampleIntervalMs: positiveInt(env.ECOFLOW_SAMPLE_INTERVAL_MS, 10_000),
         includeRaw: env.STORE_RAW_PAYLOADS === "true",
       },
       { logger },
@@ -82,7 +84,12 @@ export function buildConnector(
         model: env.ECOFLOW_DEVICE_MODEL?.trim() || "EcoFlow DELTA 2",
         name: env.ECOFLOW_DEVICE_NAME?.trim() || "EcoFlow battery",
       },
-      expectedIntervalSeconds: Math.round(pollIntervalMs / 1000),
+      // On MQTT, samples are recorded at sampleIntervalMs, not the poll interval.
+      expectedIntervalSeconds: Math.round(
+        (env.ECOFLOW_TRANSPORT?.trim().toLowerCase() === "poll"
+          ? pollIntervalMs
+          : positiveInt(env.ECOFLOW_SAMPLE_INTERVAL_MS, 10_000)) / 1000,
+      ),
     };
   }
 

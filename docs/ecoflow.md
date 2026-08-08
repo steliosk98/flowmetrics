@@ -82,7 +82,9 @@ returns, which is what you want when adding support for another model.
 |---|---|
 | Bound device list, online state | `GET /iot-open/sign/device/list` |
 | All current telemetry | `GET /iot-open/sign/device/quota/all` |
-| MQTT credentials (implemented, unused) | `GET /iot-open/sign/certification` |
+| MQTT credentials | `GET /iot-open/sign/certification` |
+| Live telemetry (default transport) | MQTT `/open/${certificateAccount}/${sn}/quota` |
+| Online/offline transitions | MQTT `/open/${certificateAccount}/${sn}/status` |
 
 Requests are signed per the documented algorithm: flatten nested parameters,
 sort the pairs by ASCII value, append `accessKey`/`nonce`/`timestamp`, HMAC-SHA256
@@ -91,11 +93,9 @@ expected signature; that vector is asserted in `packages/connectors/ecoflow-sign
 so a regression in the algorithm fails the test suite rather than failing against
 live hardware.
 
-Transport is **polling**, not MQTT, defaulting to one request every 30 seconds.
-The historian integrates power over time rather than reacting to individual
-pushes, so polling is sufficient, and it avoids an MQTT dependency. EcoFlow does
-not publish a rate limit, hence the conservative default; `ECOFLOW_POLL_INTERVAL_MS`
-changes it.
+Transport defaults to **MQTT**; HTTP polling remains as an automatic fallback and
+as the startup seed. EcoFlow does not publish a rate limit, so the polling
+interval stays conservative at 30 seconds (`ECOFLOW_POLL_INTERVAL_MS`).
 
 ## Field mapping (DELTA 2 / DELTA 2 Max)
 
@@ -151,7 +151,44 @@ Stored per sample in `telemetry_samples.quality_flags`:
 | 32 | Combined view: not every battery contributed a value |
 | 64 | Combined view: a capacity was unknown, so SOC is an unweighted mean |
 
-### Reporting cadence: the cloud is not live
+### Transport: use MQTT, not the HTTP cache
+
+**MQTT is the default and you want it.** The two transports differ enormously:
+
+| | HTTP polling | MQTT |
+|---|---|---|
+| Source | EcoFlow's cached last-reported state | The device's own live reports |
+| Measured rate | ~13 distinct readings in 90 min | ~1 message/sec, ~3 distinct readings/min |
+| Phone app | Effectively needed to refresh the cache | Not needed |
+
+Set `ECOFLOW_TRANSPORT=poll` only to deliberately fall back; MQTT already falls
+back on its own if the broker cannot be reached.
+
+MQTT reports are **deltas** carrying only changed fields, namespaced by module
+rather than by the HTTP dotted prefixes:
+
+```json
+{"moduleType":5,"typeCode":"mpptStatus","params":{"chgType":2,"inWatts":152},"version":"1.0"}
+```
+
+`moduleType` is the documented ModuleType table (1: PD, 2: BMS, 3: INV, 5: MPPT)
+and `typeCode` separates the two BMS report kinds. FlowMetrics merges these into
+the same dotted key space the HTTP API uses (`mppt.inWatts`, `bms_bmsStatus.soc`,
+…), so the field mapping above applies unchanged — there is no second set of
+field definitions to keep in sync. `moduleType: 2` without a `typeCode` is
+ignored rather than guessed, because `bmsStatus` and `emsStatus` share it and
+picking wrong would corrupt SOC.
+
+Because deltas only carry changes, the connector seeds each device from
+`quota/all` on startup and re-seeds every 15 minutes, so a dropped message cannot
+leave a stale value in the merged state indefinitely.
+
+Samples are recorded from the live state every `ECOFLOW_SAMPLE_INTERVAL_MS`
+(default 10s) rather than once per message: the device reports roughly once a
+second, which would be ~86,000 rows per battery per day, and even spacing is what
+gap-aware integration wants.
+
+### Why the HTTP cache is stale
 
 EcoFlow's HTTP API serves **the device's last reported state**, not a live read.
 An idle DELTA 2 can go many minutes without reporting, and opening the EcoFlow
@@ -175,10 +212,8 @@ Consequences, and how FlowMetrics handles them:
   treat totals across long repeated stretches as approximate.
 - Polling faster does not help; it returns the same cached report more often.
   `ECOFLOW_POLL_INTERVAL_MS` is a latency setting, not a resolution setting.
-- MQTT (`/open/${certificateAccount}/${sn}/quota`) would deliver each report the
-  moment the device publishes, removing poll latency and API load. It does not
-  make the device report more often. The certificate endpoint is implemented in
-  the client; the subscription is not.
+- **MQTT solves this**, and is the default transport. The device publishes
+  continuously regardless of the HTTP cache; see above.
 
 ### Offline devices leave gaps
 
@@ -204,4 +239,5 @@ rather than bridging it.
 | `rejected the request ... code 6xx` | Signature mismatch — usually a stray space in the secret key |
 | Credentials work, empty device list | Device is shared with the account rather than bound to it |
 | Collector `degraded`, "Device reported offline" | Battery is off or has no network; this is reported, not hidden |
+| Data only updates when the phone app is opened | The poll transport is in use. Set `ECOFLOW_TRANSPORT=mqtt` |
 | All power fields NULL | Model reports different quota keys — run the probe with `--raw` |

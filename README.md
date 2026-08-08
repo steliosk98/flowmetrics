@@ -64,7 +64,7 @@ node scripts/ecoflow-probe.mjs
 
 Several batteries on one account are each recorded separately, with an optional combined site view (`?device=all`) that sums power and energy but weights state of charge by capacity and omits figures that cannot be honestly combined.
 
-Note that EcoFlow's API serves the device's *last reported state*, not a live read — an idle DELTA 2 can go many minutes between reports. Repeated readings are flagged and the dashboard shows when the device last reported a change.
+Telemetry arrives over **MQTT**, subscribing to the battery's own live reports — roughly one message per second with the phone app closed. EcoFlow's HTTP endpoints serve a cached last-reported state that for an idle DELTA 2 can be tens of minutes old; they are used only to seed and re-sync, and as an automatic fallback.
 
 Other EcoFlow models authenticate fine but report different quota keys and need their own mapping module. See [EcoFlow support](docs/ecoflow.md).
 
