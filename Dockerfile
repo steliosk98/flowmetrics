@@ -15,6 +15,9 @@ COPY --from=build --chown=flowmetrics:flowmetrics /src/apps/web/dist ./apps/web/
 COPY --from=build --chown=flowmetrics:flowmetrics /src/public ./apps/web/dist
 COPY --from=build --chown=flowmetrics:flowmetrics /src/server-dist ./server-dist
 COPY --from=build --chown=flowmetrics:flowmetrics /src/migrations ./migrations
+# Troubleshooting tool: `docker compose exec flowmetrics node scripts/ecoflow-probe.mjs`
+# checks credentials from inside the container, where the .env already applies.
+COPY --from=build --chown=flowmetrics:flowmetrics /src/scripts/ecoflow-probe.mjs ./scripts/
 RUN mkdir -p /app/data && chown flowmetrics:flowmetrics /app/data
 USER flowmetrics
 EXPOSE 3000
