@@ -223,6 +223,28 @@ into real energy totals, so the collector emits nothing while the device is
 offline. The resulting gap is genuine, and the gap-aware integrator excludes it
 rather than bridging it.
 
+## Validating that data is live
+
+```bash
+node scripts/freshness-check.mjs --minutes 20
+# or from inside the container:
+docker compose exec flowmetrics node scripts/freshness-check.mjs
+```
+
+Run it with the mobile app **closed**. It reads only the public API, exits
+non-zero when the feed looks stuck, and judges two separate things:
+
+- **Cadence** — are samples still being written every `ECOFLOW_SAMPLE_INTERVAL_MS`?
+- **Delivery** — are the device's own reports still arriving unprompted? Measured
+  from the `REPEATED_READING` flag, so it uses the collector's own definition of
+  a fresh report rather than re-deriving one.
+
+An idle battery legitimately reports very little — a dark night with a steady
+load can be 9% fresh samples — so a quiet spell is reported as context, not as a
+failure. What matters is that new reports keep arriving without touching the app.
+`/api/v1/status` also exposes `collector.transport`, so a silent fallback from
+`mqtt` to `poll` is visible rather than hiding behind a healthy status.
+
 ## Adding another model
 
 1. Run `node scripts/ecoflow-probe.mjs --raw` against the hardware and keep the output.

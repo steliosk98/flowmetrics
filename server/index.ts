@@ -150,9 +150,21 @@ const capacityOf = (id: string) => devices.get(id)?.capacityWh;
 /** Every device id, for fan-out queries. */
 const allDeviceIds = () => deviceList().map(d => d.id);
 
+/**
+ * Which transport is actually carrying data. MQTT falls back to HTTP polling on
+ * failure, and that fallback still reports "healthy" while quietly serving
+ * EcoFlow's stale cache — so it has to be visible.
+ */
+function activeTransport(): string | undefined {
+  const candidate = connector as unknown as { activeTransport?: string };
+  return typeof candidate?.activeTransport === "string" ? candidate.activeTransport : undefined;
+}
+
 function collectorHealth() {
   const health = connector?.getHealth() ?? { status: "stopped" as const, error: "collector disabled" };
-  return collectorError ? { ...health, status: "degraded" as const, error: collectorError } : health;
+  const transport = activeTransport();
+  const withTransport = transport ? { ...health, transport } : health;
+  return collectorError ? { ...withTransport, status: "degraded" as const, error: collectorError } : withTransport;
 }
 
 app.get("/api/v1/health", async (_request, reply) => reply.code(databaseReady ? 200 : 503).send({ healthy: databaseReady, database: databaseReady ? "reachable" : "unavailable", migrations: databaseReady ? "current" : "unknown", collector: collectorHealth(), deviceCount: devices.size, timestamp: new Date().toISOString() }));
