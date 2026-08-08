@@ -67,7 +67,7 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
 }
 .flow-anchor {
   position: absolute;
-  z-index: 2;
+  z-index: 4;
   top: 0;
   left: 50%;
   width: 42px;
@@ -83,9 +83,9 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
   z-index: 3;
   width: max-content;
   min-width: 76px;
-  margin: 0 auto;
-  padding: 27px 5px 2px;
-  background: var(--panel);
+  margin: 30px auto 0;
+  padding: 0 5px 2px;
+  background: transparent;
   border-radius: 8px;
 }
 .flow-copy strong { display: block; font-size: 18px; line-height: 1.1; }
@@ -98,7 +98,12 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
 .solar-node .flow-anchor { background: var(--solar-soft); color: #d79b23; }
 .load-node .flow-anchor { background: #fff0eb; color: var(--load); }
 .grid-node .flow-anchor { background: var(--grid-soft); color: var(--grid); }
-.battery-node .flow-copy { padding-top: 55px; }
+.battery-node .flow-copy { margin-top: 57px; padding-top: 0; }
+.load-node .flow-copy,
+.grid-node .flow-copy {
+  background: var(--panel);
+  box-shadow: 0 0 0 4px var(--panel);
+}
 .battery-node .battery-ring {
   width: 94px;
   height: 94px;
