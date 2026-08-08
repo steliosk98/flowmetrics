@@ -118,12 +118,20 @@ function Overview() {
       <div className="live-card panel">
         <div className="section-heading"><div><p className="eyebrow">LIVE POWER FLOW</p><h2>Right now</h2></div><div className="live-pill"><StatusDot /> Live</div></div>
         <div className="flow-stage">
+          <svg className="flow-links" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+            <g className="flow-link flow-link-active">
+              <line className="flow-link-base" x1="166.67" y1="250" x2="500" y2="550" vectorEffect="non-scaling-stroke" />
+              <line className="flow-link-motion" x1="166.67" y1="250" x2="500" y2="550" pathLength="100" vectorEffect="non-scaling-stroke" />
+            </g>
+            <g className="flow-link flow-link-active">
+              <line className="flow-link-base" x1="500" y1="550" x2="833.33" y2="250" vectorEffect="non-scaling-stroke" />
+              <line className="flow-link-motion flow-link-motion-delayed" x1="500" y1="550" x2="833.33" y2="250" pathLength="100" vectorEffect="non-scaling-stroke" />
+            </g>
+            <line className="flow-link-inactive" x1="833.33" y1="250" x2="833.33" y2="780" pathLength="100" vectorEffect="non-scaling-stroke" />
+          </svg>
           <div className="flow-node solar-node"><div className="flow-anchor"><MiniIcon name="sun"/></div><div className="flow-copy"><strong>843 W</strong><span>Solar</span></div></div>
-          <div className="flow-line line-a"><i /></div>
           <div className="flow-node battery-node"><div className="flow-anchor battery-ring"><strong>73%</strong></div><div className="flow-copy"><span>Battery</span><small>326 W charging</small></div></div>
-          <div className="flow-line line-b"><i /></div>
           <div className="flow-node load-node"><div className="flow-anchor"><MiniIcon name="load"/></div><div className="flow-copy"><strong>491 W</strong><span>Home load</span></div></div>
-          <div className="flow-line line-c"><i /></div>
           <div className="flow-node grid-node"><div className="flow-anchor"><MiniIcon name="grid"/></div><div className="flow-copy"><strong>0 W</strong><span>Grid</span></div></div>
         </div>
         <div className="live-foot"><span><StatusDot/> Delta 2 Max is online</span><span>Updated 8 sec ago</span></div>

@@ -108,56 +108,41 @@ main { max-width: 1510px; margin: auto; padding: 32px clamp(24px,4vw,58px) 70px;
 .battery-node .battery-ring::before { content: ""; position: absolute; inset: 8px; border-radius: 50%; background: var(--panel); }
 .battery-node .battery-ring strong { position: relative; z-index: 1; font-size: 25px; }
 
-.flow-line {
+.flow-links {
   position: absolute;
   z-index: 1;
-  height: auto;
-  overflow: hidden;
-  transform: none;
-  background: none;
-}
-.flow-line::before {
-  content: "";
-  position: absolute;
   inset: 0;
-  opacity: .9;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
 }
-.flow-line i {
-  position: absolute;
-  z-index: 2;
-  display: block;
-  width: 18px;
-  height: 18px;
-  margin: 0;
-  border-radius: 999px;
-  background: radial-gradient(circle, var(--green) 0 2px, color-mix(in srgb, var(--green) 48%, transparent) 3px, transparent 8px);
-  box-shadow: none;
+.flow-link-base {
+  stroke: color-mix(in srgb, var(--line) 48%, var(--green) 52%);
+  stroke-width: 2;
+  stroke-linecap: round;
 }
-/* Solar center (16.667%,25%) to battery center (50%,55%). */
-.line-a { left: 16.667%; top: 25%; width: 33.333%; height: 30%; }
-.line-a::before { background: linear-gradient(to bottom left, transparent calc(50% - 1px), color-mix(in srgb, var(--line) 55%, var(--green) 45%) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); }
-.line-a i { animation: flow-down-right 2.6s linear infinite; }
-/* Battery center (50%,55%) to load center (83.333%,25%). */
-.line-b { left: 50%; top: 25%; width: 33.333%; height: 30%; }
-.line-b::before { background: linear-gradient(to bottom right, transparent calc(50% - 1px), color-mix(in srgb, var(--line) 55%, var(--green) 45%) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); }
-.line-b i { animation: flow-up-right 2.6s linear infinite -1.3s; }
-/* Load center to grid center. Zero watts stays clearly connected but inactive. */
-.line-c {
-  left: calc(83.333% - 1px);
-  top: 25%;
-  width: 2px;
-  height: 53%;
-  overflow: hidden;
+.flow-link-motion {
+  stroke: var(--green);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 8 92;
+  stroke-dashoffset: 100;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--green) 65%, transparent));
+  animation: flow-path 2.6s linear infinite;
 }
-.line-c::before { background: repeating-linear-gradient(to bottom, color-mix(in srgb, var(--line) 82%, var(--grid) 18%) 0 5px, transparent 5px 9px); }
-.line-c i { display: none; }
-@keyframes flow-down-right {
-  from { left: -9px; top: -9px; }
-  to { left: calc(100% - 9px); top: calc(100% - 9px); }
+.flow-link-motion-delayed { animation-delay: -1.3s; }
+.flow-link-inactive {
+  stroke: color-mix(in srgb, var(--line) 78%, var(--grid) 22%);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 5 8;
 }
-@keyframes flow-up-right {
-  from { left: -9px; top: calc(100% - 9px); }
-  to { left: calc(100% - 9px); top: -9px; }
+@keyframes flow-path {
+  to { stroke-dashoffset: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-link-motion { animation: none; stroke-dashoffset: 46; }
 }
 
 @media(max-width:1100px){.metric-grid{grid-template-columns:1fr 1fr}.hero-grid,.two-col,.device-grid{grid-template-columns:1fr}.history-summary,.export-grid{grid-template-columns:1fr 1fr}.impact-card{min-height:300px}.data-health{grid-template-columns:repeat(3,1fr)}.data-health div:nth-child(3){border-right:0}}
