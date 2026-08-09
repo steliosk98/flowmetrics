@@ -223,6 +223,29 @@ into real energy totals, so the collector emits nothing while the device is
 offline. The resulting gap is genuine, and the gap-aware integrator excludes it
 rather than bridging it.
 
+## Days are local midnight to local midnight
+
+Every day-scoped view — the Overview, its charts, the daily rollups and the CSV
+export — covers 00:00 to 24:00 **in the device's timezone** (`TZ`), not a rolling
+24-hour window and not UTC.
+
+This matters more than it sounds. `rebuildDay` previously took UTC midnight while
+storing the device's timezone alongside it, so on Europe/Nicosia in summer a
+"day" actually ran 21:00 to 21:00 and three hours of every evening were filed
+under the wrong date. Boundaries now come from `packages/core/day.ts`, which
+resolves offsets through `Intl` — so DST is handled by the platform tz database
+and a spring-forward day is correctly 23 hours long, not 24.
+
+Pass `?date=YYYY-MM-DD` to `/api/v1/history`, `/summary`, `/events` and
+`/export/telemetry.csv` to get a specific day; omit it for today.
+`/api/v1/days` lists which local dates have data, which is what bounds the
+dashboard's day picker. `/api/v1/events?all=true` returns the whole log rather
+than one day.
+
+`date` columns are returned as plain `YYYY-MM-DD` strings. Left as JS Dates they
+serialise to an instant, and a browser in another timezone parses that back to
+the adjacent day — a calendar date has no timezone and is kept that way.
+
 ## Validating that data is live
 
 ```bash

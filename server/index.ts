@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ServerResponse } from "node:http";
-import { combineDailySeries, combineSamples, combineSeries, COMBINED_DEVICE_ID, demoSampleAt, EventDetector, type NormalizedTelemetry } from "../packages/core/index";
+import { combineDailySeries, combineSamples, combineSeries, COMBINED_DEVICE_ID, demoSampleAt, EventDetector, isLocalDate, localDayRange, todayIn, type LocalDate, type NormalizedTelemetry } from "../packages/core/index";
 import { ensureDevice, persistTelemetry, pool, runMigrations } from "./db";
 import { getSamples, rebuildDay, rowToSample } from "./analytics";
 import { registerAuth } from "./auth";
@@ -215,6 +215,21 @@ app.get("/api/v1/devices", async () => {
 });
 
 type DeviceQuery = { device?: string };
+type DayQuery = DeviceQuery & { date?: string };
+
+/** Local timezone the days are expressed in; every device shares the instance TZ. */
+const instanceTimeZone = () => process.env.TZ?.trim() || "UTC";
+
+/**
+ * Resolves `?date=YYYY-MM-DD` to a local midnight-to-midnight range.
+ * An absent or malformed date means today, in the instance's timezone.
+ */
+function resolveDay(date?: string): { date: LocalDate; start: Date; end: Date } {
+  const zone = instanceTimeZone();
+  const localDate = isLocalDate(date) ? date : todayIn(zone);
+  const { start, end } = localDayRange(localDate, zone);
+  return { date: localDate, start, end };
+}
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/current", async request => {
   if (wantsCombined(request.query.device)) {
@@ -233,33 +248,39 @@ app.get<{ Querystring: DeviceQuery }>("/api/v1/current", async request => {
   return isDemo ? demoSampleAt(new Date()) : null;
 });
 
-app.get<{ Querystring: DeviceQuery & { from?: string; to?: string; maxPoints?: string } }>("/api/v1/history", async request => {
-  const to = request.query.to ? new Date(request.query.to) : new Date(); const from = request.query.from ? new Date(request.query.from) : new Date(to.getTime()-86_400_000);
+app.get<{ Querystring: DayQuery & { from?: string; to?: string; maxPoints?: string } }>("/api/v1/history", async request => {
+  // A calendar day is the default view. Explicit from/to remains available for
+  // ad-hoc ranges (the freshness check uses it).
+  const explicitRange = request.query.from || request.query.to;
+  const day = resolveDay(request.query.date);
+  const to = explicitRange ? (request.query.to ? new Date(request.query.to) : new Date()) : day.end;
+  const from = explicitRange ? (request.query.from ? new Date(request.query.from) : new Date(to.getTime()-86_400_000)) : day.start;
   const maxPoints = Math.min(5000, Math.max(100, Number(request.query.maxPoints ?? 3000)));
 
   if (wantsCombined(request.query.device) && databaseReady) {
     const series = await Promise.all(allDeviceIds().map(id => getSamples(id, from, to, maxPoints)));
     // Buckets are the poll interval, so batteries polled seconds apart line up.
-    return { from, to, points: combineSeries(series, capacityOf, expectedIntervalSeconds) };
+    return { from, to, date: explicitRange ? undefined : day.date, points: combineSeries(series, capacityOf, expectedIntervalSeconds) };
   }
 
   const device = resolveDevice(request.query.device);
   if (!databaseReady || !device) return { from, to, coveragePct: isDemo ? 100 : 0, points: isDemo ? Array.from({ length: 288 },(_,i)=>demoSampleAt(new Date(from.getTime()+i*300_000))) : [] };
-  const points = await getSamples(device.id,from,to,maxPoints); return { from,to,points };
+  const points = await getSamples(device.id,from,to,maxPoints); return { from,to,date: explicitRange ? undefined : day.date,points };
 });
 
-app.get<{ Querystring: DeviceQuery }>("/api/v1/summary", async request => {
+app.get<{ Querystring: DayQuery }>("/api/v1/summary", async request => {
+  const day = resolveDay(request.query.date);
   if (wantsCombined(request.query.device) && databaseReady) {
     const ids = allDeviceIds();
-    await Promise.all(ids.map(id => rebuildDay(id, new Date(), expectedIntervalSeconds)));
-    const rows = await pool.query("SELECT * FROM energy_daily WHERE device_id = ANY($1) AND local_date = (SELECT max(local_date) FROM energy_daily WHERE device_id = ANY($1))", [ids]);
-    return combineDailySeries(rows.rows)[0] ?? {};
+    await Promise.all(ids.map(id => rebuildDay(id, day.date, expectedIntervalSeconds)));
+    const rows = await pool.query("SELECT * FROM energy_daily WHERE device_id = ANY($1) AND local_date = $2", [ids, day.date]);
+    return combineDailySeries(rows.rows)[0] ?? { local_date: day.date };
   }
   const device = resolveDevice(request.query.device);
-  if (!databaseReady || !device) return { coveragePct: isDemo ? 100 : 0, mode };
-  await rebuildDay(device.id,new Date(),expectedIntervalSeconds);
-  const result=await pool.query("SELECT * FROM energy_daily WHERE device_id=$1 ORDER BY local_date DESC LIMIT 1",[device.id]);
-  return result.rows[0] ?? {};
+  if (!databaseReady || !device) return { coveragePct: isDemo ? 100 : 0, mode, local_date: day.date };
+  await rebuildDay(device.id, day.date, expectedIntervalSeconds);
+  const result = await pool.query("SELECT * FROM energy_daily WHERE device_id=$1 AND local_date=$2", [device.id, day.date]);
+  return result.rows[0] ?? { local_date: day.date };
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/daily", async request => {
@@ -271,14 +292,43 @@ app.get<{ Querystring: DeviceQuery }>("/api/v1/daily", async request => {
   return databaseReady && device ? (await pool.query("SELECT * FROM energy_daily WHERE device_id=$1 ORDER BY local_date DESC LIMIT 366",[device.id])).rows : [];
 });
 
-app.get<{ Querystring: DeviceQuery }>("/api/v1/events", async request => {
+app.get<{ Querystring: DayQuery & { all?: string } }>("/api/v1/events", async request => {
+  // The Events page wants the whole log; the Overview timeline wants one day.
+  const scoped = request.query.all !== "true";
+  const day = resolveDay(request.query.date);
+  const range = scoped ? [day.start, day.end] : [];
+  const clause = scoped ? " AND e.started_at >= $2 AND e.started_at < $3" : "";
+
   if (wantsCombined(request.query.device) && databaseReady) {
     // Events stay per battery — merged into one timeline, labelled by device.
-    const rows = await pool.query("SELECT e.*, d.name AS device_name FROM device_events e JOIN devices d ON d.id=e.device_id WHERE e.device_id = ANY($1) ORDER BY e.started_at DESC LIMIT 500", [allDeviceIds()]);
+    const rows = await pool.query(`SELECT e.*, d.name AS device_name FROM device_events e JOIN devices d ON d.id=e.device_id WHERE e.device_id = ANY($1)${clause} ORDER BY e.started_at DESC LIMIT 500`, [allDeviceIds(), ...range]);
     return rows.rows;
   }
   const device = resolveDevice(request.query.device);
-  return databaseReady && device ? (await pool.query("SELECT * FROM device_events WHERE device_id=$1 ORDER BY started_at DESC LIMIT 500",[device.id])).rows : [];
+  if (!databaseReady || !device) return [];
+  const rows = await pool.query(`SELECT e.* FROM device_events e WHERE e.device_id=$1${clause} ORDER BY e.started_at DESC LIMIT 500`, [device.id, ...range]);
+  return rows.rows;
+});
+
+/** Range of local dates that have recorded data, for the day picker. */
+app.get<{ Querystring: DeviceQuery }>("/api/v1/days", async request => {
+  const zone = instanceTimeZone();
+  const today = todayIn(zone);
+  if (!databaseReady) return { timezone: zone, today, first: today, last: today, dates: [today] };
+
+  const ids = wantsCombined(request.query.device) ? allDeviceIds() : [resolveDevice(request.query.device)?.id].filter((x): x is string => !!x);
+  if (!ids.length) return { timezone: zone, today, first: today, last: today, dates: [today] };
+
+  // Derived from the samples themselves, so a day appears as soon as it has data
+  // rather than waiting for its rollup to be built.
+  const rows = await pool.query<{ d: string }>(
+    `SELECT DISTINCT to_char(observed_at AT TIME ZONE $2, 'YYYY-MM-DD') AS d
+     FROM telemetry_samples WHERE device_id = ANY($1) ORDER BY d DESC LIMIT 800`,
+    [ids, zone],
+  );
+  const dates = rows.rows.map(r => r.d);
+  if (!dates.includes(today)) dates.unshift(today);
+  return { timezone: zone, today, first: dates[dates.length - 1] ?? today, last: dates[0] ?? today, dates };
 });
 
 app.get<{ Querystring: DeviceQuery }>("/api/v1/stats", async (request, reply) => {
@@ -303,15 +353,17 @@ app.get<{ Querystring: DeviceQuery }>("/api/v1/stats", async (request, reply) =>
   };
 });
 
-app.get<{ Querystring: DeviceQuery & { from?:string; to?:string } }>("/api/v1/export/telemetry.csv", async (request,reply) => {
-  const to=request.query.to?new Date(request.query.to):new Date();
-  const from=request.query.from?new Date(request.query.from):new Date(to.getTime()-86_400_000);
+app.get<{ Querystring: DayQuery & { from?:string; to?:string } }>("/api/v1/export/telemetry.csv", async (request,reply) => {
+  const explicitRange = request.query.from || request.query.to;
+  const day = resolveDay(request.query.date);
+  const to = explicitRange ? (request.query.to?new Date(request.query.to):new Date()) : day.end;
+  const from = explicitRange ? (request.query.from?new Date(request.query.from):new Date(to.getTime()-86_400_000)) : day.start;
   const combined = wantsCombined(request.query.device);
   const device = combined ? undefined : resolveDevice(request.query.device);
   const points = !databaseReady ? []
     : combined ? combineSeries(await Promise.all(allDeviceIds().map(id => getSamples(id, from, to, 100_000))), capacityOf, expectedIntervalSeconds)
     : device ? await getSamples(device.id, from, to, 100_000) : [];
-  const filename = combined ? "flowmetrics-all-batteries.csv" : device ? `flowmetrics-${device.vendorDeviceId}.csv` : "flowmetrics-telemetry.csv";
+  const filename = `flowmetrics-${combined ? "all-batteries" : device?.vendorDeviceId ?? "telemetry"}-${day.date}.csv`;
   reply.header("Content-Type","text/csv").header("Content-Disposition",`attachment; filename=${filename}`);
   return ["observed_at,battery_soc_pct,solar_input_w,grid_input_w,battery_charge_power_w,battery_discharge_power_w,total_output_w",...points.map(p=>[p.observedAt.toISOString(),p.batterySocPct,p.solarInputW,p.gridInputW,p.batteryChargePowerW,p.batteryDischargePowerW,p.totalOutputW].join(","))].join("\n");
 });

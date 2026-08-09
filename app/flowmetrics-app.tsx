@@ -3,7 +3,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   batteryLabel, EVENT_LABELS, eventKind, formatClock, formatDuration, formatKwh, formatPct,
-  formatCount, formatRelative, formatWatts, toNum, useJson, useLiveFeed, useNow, withDevice,
+  formatCount, formatRelative, formatWatts, toNum, useJson, useLiveFeed, useNow, withDevice, withDay,
+  formatDayLabel, shiftDate, type DaysResponse,
   combineLiveSamples, COMBINED_DEVICE_ID,
   type DailyRow, type DeviceSummary, type EventRow, type Numeric, type Sample, type SampleMap, type StatsResponse, type StatusResponse,
 } from "./use-flowmetrics-data";
@@ -43,10 +44,19 @@ interface DashboardValue {
   reloadToken: number;
   refresh: () => void;
   refreshing: boolean;
+  /** Calendar day the day-scoped views show, `YYYY-MM-DD` in the device timezone. */
+  date: string;
+  setDate: (date: string) => void;
+  /** Selects a day and opens the Overview on it. */
+  showDay: (date: string) => void;
+  /** Today in that timezone, and the range of days that have data. */
+  days?: DaysResponse;
+  isToday: boolean;
 }
 
 const DashboardContext = createContext<DashboardValue>({
   setDeviceId: () => {}, devices: [], samples: {}, connected: false, reloadToken: 0, refresh: () => {}, refreshing: false,
+  date: "", setDate: () => {}, showDay: () => {}, isToday: true,
 });
 const useDashboard = () => useContext(DashboardContext);
 /** Latest reading for one device, taken from the shared stream. */
@@ -108,17 +118,69 @@ function SocChart({ points }: { points: Sample[] }) {
   </div>;
 }
 
+/** Makes it unmistakable that the page is not showing live data. */
+function DayBanner({ date, today }: { date: string; today?: string }) {
+  const { setDate } = useDashboard();
+  return <div className="day-banner">
+    <span><MiniIcon name="history"/> Viewing <b>{formatDayLabel(date, today)}</b> · 00:00 to 24:00</span>
+    {today && <button className="text-button" onClick={() => setDate(today)}>Back to today →</button>}
+  </div>;
+}
+
+/**
+ * Day navigation. Days run local midnight to local midnight, so `date` is a
+ * calendar date rather than a rolling 24-hour window.
+ */
+function DayNav() {
+  const { date, setDate, days, isToday } = useDashboard();
+  if (!date) return null;
+  const today = days?.today ?? date;
+  const first = days?.first;
+  const canGoBack = !first || date > first;
+
+  return <div className="day-nav">
+    <button
+      onClick={() => setDate(shiftDate(date, -1))}
+      disabled={!canGoBack}
+      aria-label="Previous day"
+      title={canGoBack ? "Previous day" : "No earlier data recorded"}
+    >‹</button>
+    <label className="day-nav-label">
+      <b>{formatDayLabel(date, today)}</b>
+      {/* A native date input keeps keyboard and mobile pickers working for free. */}
+      <input
+        type="date"
+        value={date}
+        min={first}
+        max={today}
+        onChange={event => { if (event.target.value) setDate(event.target.value); }}
+        aria-label="Choose a day"
+      />
+    </label>
+    <button
+      onClick={() => setDate(shiftDate(date, 1))}
+      disabled={isToday}
+      aria-label="Next day"
+      title={isToday ? "Already showing today" : "Next day"}
+    >›</button>
+  </div>;
+}
+
 /**
  * Every battery at a glance. Each card is its own reading — nothing here is
  * summed across packs. Selecting a card points the rest of the page at it.
  */
 function BatteryStrip() {
-  const { devices, samples, deviceId, setDeviceId } = useDashboard();
+  const { devices, samples, deviceId, setDeviceId, isToday } = useDashboard();
   const batteries = devices.filter(d => !d.combined);
   if (batteries.length < 2) return null;
   const combinedSelected = deviceId === COMBINED_DEVICE_ID;
 
   return <section className="battery-strip" aria-label="All batteries">
+    {/* These chips are always the live reading. On a past day the panels below
+        show that day instead, so the difference is called out rather than left
+        for the reader to notice two different numbers. */}
+    {!isToday && <p className="strip-caption">Live right now — the day below is historic</p>}
     {batteries.map(device => {
       const sample = samples[device.id];
       const online = sample?.deviceOnline ?? device.online ?? undefined;
@@ -155,14 +217,18 @@ function BatteryStrip() {
 }
 
 function Overview() {
-  const { deviceId, connected, reloadToken, devices } = useDashboard();
+  const { deviceId, connected, reloadToken, devices, date, isToday, days } = useDashboard();
   const sample = useSample(deviceId);
   const device = devices.find(d => d.id === deviceId);
-  const summary = useJson<DailyRow>(withDevice("/api/v1/summary", deviceId), 60_000, reloadToken);
-  const history = useJson<{ points: Sample[] }>(withDevice("/api/v1/history", deviceId), 120_000, reloadToken);
-  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000, reloadToken);
+  // Past days never change, so they are fetched once rather than polled.
+  const refresh = isToday ? 60_000 : undefined;
+  const summary = useJson<DailyRow>(withDay("/api/v1/summary", deviceId, date), refresh, reloadToken);
+  const history = useJson<{ points: Sample[] }>(withDay("/api/v1/history", deviceId, date), isToday ? 120_000 : undefined, reloadToken);
+  const events = useJson<EventRow[]>(withDay("/api/v1/events", deviceId, date), refresh, reloadToken);
 
   const points = history.data?.points ?? [];
+  // On a past day the live stream is irrelevant; show that day's final reading.
+  const shown = isToday ? sample : points.at(-1);
   const today = summary.data;
   const solarWh = toNum(today?.solar_energy_wh) ?? 0;
   const gridWh = toNum(today?.grid_energy_wh) ?? 0;
@@ -185,9 +251,15 @@ function Overview() {
 
   return <>
     <BatteryStrip/>
+    {!isToday && <DayBanner date={date} today={days?.today}/>}
     <section className="hero-grid">
-      <div className="live-card panel">
-        <div className="section-heading"><div><p className="eyebrow">LIVE POWER FLOW</p><h2>Right now</h2></div><div className="live-pill"><StatusDot warn={!connected} /> {connected ? "Live" : "Reconnecting"}</div></div>
+      <div className={`live-card panel${isToday ? "" : " historic"}`}>
+        <div className="section-heading">
+          <div><p className="eyebrow">{isToday ? "LIVE POWER FLOW" : "END OF DAY"}</p><h2>{isToday ? "Right now" : formatDayLabel(date, days?.today)}</h2></div>
+          {isToday
+            ? <div className="live-pill"><StatusDot warn={!connected} /> {connected ? "Live" : "Reconnecting"}</div>
+            : <div className="live-pill historic">Last reading</div>}
+        </div>
         <div className="flow-stage">
           <svg className="flow-links" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
             <g className="flow-link flow-link-active">
@@ -200,23 +272,27 @@ function Overview() {
             </g>
             <line className="flow-link-inactive" x1="833.33" y1="250" x2="833.33" y2="700" pathLength="100" vectorEffect="non-scaling-stroke" />
           </svg>
-          <div className="flow-node solar-node"><div className="flow-anchor"><MiniIcon name="sun"/></div><div className="flow-copy"><strong>{formatWatts(sample?.solarInputW)}</strong><span>Solar</span></div></div>
-          <div className="flow-node battery-node"><div className="flow-anchor battery-ring"><strong>{formatPct(sample?.batterySocPct)}</strong></div><div className="flow-copy"><span>Battery</span><small>{batteryLabel(sample)}</small></div></div>
-          <div className="flow-node load-node"><div className="flow-anchor"><MiniIcon name="load"/></div><div className="flow-copy"><strong>{formatWatts(sample?.totalOutputW)}</strong><span>Home load</span></div></div>
-          <div className="flow-node grid-node"><div className="flow-anchor"><MiniIcon name="grid"/></div><div className="flow-copy"><strong>{formatWatts(sample?.gridInputW)}</strong><span>Grid</span></div></div>
+          <div className="flow-node solar-node"><div className="flow-anchor"><MiniIcon name="sun"/></div><div className="flow-copy"><strong>{formatWatts(shown?.solarInputW)}</strong><span>Solar</span></div></div>
+          <div className="flow-node battery-node"><div className="flow-anchor battery-ring"><strong>{formatPct(shown?.batterySocPct)}</strong></div><div className="flow-copy"><span>Battery</span><small>{batteryLabel(shown)}</small></div></div>
+          <div className="flow-node load-node"><div className="flow-anchor"><MiniIcon name="load"/></div><div className="flow-copy"><strong>{formatWatts(shown?.totalOutputW)}</strong><span>Home load</span></div></div>
+          <div className="flow-node grid-node"><div className="flow-anchor"><MiniIcon name="grid"/></div><div className="flow-copy"><strong>{formatWatts(shown?.gridInputW)}</strong><span>Grid</span></div></div>
         </div>
         {/* observedAt is when we polled. EcoFlow re-serves an idle battery's last
             report, so the device's own last change is shown instead — that is the
             figure that says how current these numbers really are. */}
         <div className="live-foot">
-          <span><StatusDot warn={sample?.deviceOnline === false}/> {sample ? (sample.deviceOnline === false ? "Device is offline" : "Device is online") : "Waiting for the first measurement"}</span>
-          <span title="EcoFlow reports on the device's own schedule; this is when its readings last changed.">
-            {device?.lastChangedAt ? `Device reported ${formatRelative(device.lastChangedAt)}` : sample ? `Polled ${formatRelative(sample.observedAt)}` : "—"}
+          {isToday
+            ? <span><StatusDot warn={shown?.deviceOnline === false}/> {shown ? (shown.deviceOnline === false ? "Device is offline" : "Device is online") : "Waiting for the first measurement"}</span>
+            : <span><StatusDot/> Final reading of the day</span>}
+          <span title={isToday ? "EcoFlow reports on the device's own schedule; this is when its readings last changed." : undefined}>
+            {isToday
+              ? (device?.lastChangedAt ? `Device reported ${formatRelative(device.lastChangedAt)}` : shown ? `Polled ${formatRelative(shown.observedAt)}` : "—")
+              : (shown ? `Recorded at ${formatClock(shown.observedAt)}` : "—")}
           </span>
         </div>
       </div>
       <div className="impact-card panel">
-        <p className="eyebrow">TODAY&apos;S INPUT MIX</p>
+        <p className="eyebrow">{isToday ? "TODAY'S INPUT MIX" : "INPUT MIX"}</p>
         {/* The ring is driven by the measured share; with no input energy it stays neutral. */}
         <div className={`mix-donut${solarShare === undefined ? " no-input" : ""}`} style={{ "--solar-share": `${solarShare ?? 0}%` } as React.CSSProperties}>
           <div><strong>{formatPct(solarShare)}</strong><span>solar</span></div>
@@ -224,35 +300,35 @@ function Overview() {
         <div className="mix-legend"><span><i className="solar-key"/>Solar <b>{formatKwh(solarWh)} kWh</b></span><span><i className="grid-key"/>Grid <b>{formatKwh(gridWh)} kWh</b></span></div>
         <div className="impact-message"><MiniIcon name="leaf"/><span>
           {solarShare === undefined
-            ? <><b>No input energy recorded today yet.</b><small>Solar and grid input both read zero so far.</small></>
+            ? <><b>No input energy recorded{isToday ? " today yet" : ""}.</b><small>Solar and grid input both read zero.</small></>
             : solarShare >= 50
-              ? <><b>Most of today&apos;s input came from the sun.</b><small>{formatKwh(Math.abs(solarWh - gridWh))} kWh more solar than grid energy</small></>
-              : <><b>Most of today&apos;s input came from the grid.</b><small>{formatKwh(Math.abs(gridWh - solarWh))} kWh more grid than solar energy</small></>}
+              ? <><b>Most of the input came from the sun.</b><small>{formatKwh(Math.abs(solarWh - gridWh))} kWh more solar than grid energy</small></>
+              : <><b>Most of the input came from the grid.</b><small>{formatKwh(Math.abs(gridWh - solarWh))} kWh more grid than solar energy</small></>}
         </span></div>
       </div>
     </section>
-    <section className="metric-grid">{metrics.map(([label, value, unit, icon]) => <div className="metric-card panel" key={label}><div className={`metric-icon ${icon}`}><MiniIcon name={icon as "sun"}/></div><div><span>{label}</span><strong>{value} <small>{unit}</small></strong><em>today</em></div></div>)}</section>
+    <section className="metric-grid">{metrics.map(([label, value, unit, icon]) => <div className="metric-card panel" key={label}><div className={`metric-icon ${icon}`}><MiniIcon name={icon as "sun"}/></div><div><span>{label}</span><strong>{value} <small>{unit}</small></strong><em>{isToday ? "today" : formatDayLabel(date, days?.today)}</em></div></div>)}</section>
     <section className="panel chart-panel">
-      <div className="section-heading"><div><p className="eyebrow">LAST 24 HOURS</p><h2>Power over time</h2></div><div className="chart-actions"><div className="legend"><span className="solar-key">Solar</span><span className="grid-key">Grid</span><span className="battery-key">Battery</span><span className="load-key">Load</span></div></div></div>
-      {points.length > 1 ? <PowerChart points={points}/> : <Empty>{history.loading ? "Loading recorded telemetry…" : "No telemetry recorded in this window yet."}</Empty>}
+      <div className="section-heading"><div><p className="eyebrow">{isToday ? "TODAY · 00:00 TO NOW" : "00:00 TO 24:00"}</p><h2>Power over time</h2></div><div className="chart-actions"><div className="legend"><span className="solar-key">Solar</span><span className="grid-key">Grid</span><span className="battery-key">Battery</span><span className="load-key">Load</span></div></div></div>
+      {points.length > 1 ? <PowerChart points={points}/> : <Empty>{history.loading ? "Loading recorded telemetry…" : `No telemetry recorded on ${formatDayLabel(date, days?.today)}.`}</Empty>}
       {toNum(today?.coverage_pct) !== undefined && <p className="chart-note"><StatusDot warn={(toNum(today?.coverage_pct) ?? 0) < 95}/> {formatPct(today?.coverage_pct, 1)} data coverage today{(toNum(today?.gap_seconds) ?? 0) > 0 ? ` · ${formatDuration(today?.gap_seconds)} unavailable` : ""}</p>}
     </section>
     <section className="two-col">
       <div className="panel soc-panel"><div className="section-heading"><div><p className="eyebrow">BATTERY</p><h2>State of charge</h2></div><div className="soc-summary"><span>Low <b>{formatPct(socValues.length ? Math.min(...socValues) : undefined)}</b></span><span>High <b>{formatPct(socValues.length ? Math.max(...socValues) : undefined)}</b></span></div></div><SocChart points={points}/></div>
       <div className="panel timeline-panel">
-        <div className="section-heading"><div><p className="eyebrow">ENERGY TIMELINE</p><h2>Recent events</h2></div></div>
+        <div className="section-heading"><div><p className="eyebrow">ENERGY TIMELINE</p><h2>{isToday ? "Today's events" : "Events"}</h2></div></div>
         <div className="timeline">
           {(events.data ?? []).slice(0, 8).map(event => <div className="timeline-row" key={event.id}>
             <time>{formatClock(event.started_at)}</time>
             <i className={`event-dot ${eventKind(event.event_type)}`}/>
             <span><b>{EVENT_LABELS[event.event_type] ?? event.event_type}</b><small>{event.value_start == null ? "Detected from measured telemetry" : `Measured ${Math.round(event.value_start).toLocaleString()}`}</small></span>
           </div>)}
-          {!events.data?.length && <Empty>{events.loading ? "Loading events…" : "No events detected yet."}</Empty>}
+          {!events.data?.length && <Empty>{events.loading ? "Loading events…" : `No events detected on ${formatDayLabel(date, days?.today)}.`}</Empty>}
         </div>
       </div>
     </section>
     <section className="two-col analytics-row">
-      <div className="panel detail-card"><div className="detail-title"><div className="metric-icon sun"><MiniIcon name="sun"/></div><div><p className="eyebrow">SOLAR ANALYTICS</p><h2>Today&apos;s production</h2></div></div>
+      <div className="panel detail-card"><div className="detail-title"><div className="metric-icon sun"><MiniIcon name="sun"/></div><div><p className="eyebrow">SOLAR ANALYTICS</p><h2>{isToday ? "Today's production" : "Production"}</h2></div></div>
         <div className="big-stat"><strong>{formatKwh(today?.solar_energy_wh)}</strong><span>kWh collected</span></div>
         <div className="stat-list">
           <span>Peak production <b>{peakSolar == null ? "—" : `${(peakSolar / 1000).toFixed(2)} kW`}{today?.peak_solar_at ? ` · ${formatClock(today.peak_solar_at)}` : ""}</b></span>
@@ -260,7 +336,7 @@ function Overview() {
           <span>First / last production <b>{solarActive.length ? `${formatClock(solarActive[0].observedAt)} / ${formatClock(solarActive[solarActive.length - 1].observedAt)}` : "—"}</b></span>
         </div>
       </div>
-      <div className="panel detail-card"><div className="detail-title"><div className="metric-icon grid"><MiniIcon name="grid"/></div><div><p className="eyebrow">GRID ANALYTICS</p><h2>Today&apos;s import</h2></div></div>
+      <div className="panel detail-card"><div className="detail-title"><div className="metric-icon grid"><MiniIcon name="grid"/></div><div><p className="eyebrow">GRID ANALYTICS</p><h2>{isToday ? "Today's import" : "Import"}</h2></div></div>
         <div className="big-stat grid-stat"><strong>{formatKwh(today?.grid_energy_wh)}</strong><span>kWh imported</span></div>
         <div className="stat-list">
           <span>Import duration <b>{formatDuration(today?.grid_import_seconds)}</b></span>
@@ -272,12 +348,15 @@ function Overview() {
   </>;
 }
 
-function dayLabel(iso: string) {
-  return new Date(iso).toLocaleDateString([], { weekday: "short", day: "numeric" });
+function dayLabel(date: string) {
+  // Parsed from the parts: `new Date("2026-08-09")` is UTC midnight, which shows
+  // the previous day for any viewer west of Greenwich.
+  const [y, m, d] = date.slice(0, 10).split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString([], { weekday: "short", day: "numeric" });
 }
 
 function History() {
-  const { deviceId, reloadToken } = useDashboard();
+  const { deviceId, reloadToken, days, showDay } = useDashboard();
   const daily = useJson<DailyRow[]>(withDevice("/api/v1/daily", deviceId), 300_000, reloadToken);
   const rows = daily.data ?? [];
   const recent = rows.slice(0, 7);
@@ -308,12 +387,12 @@ function History() {
         <div className="data-table">
           <div className="table-row table-head"><span>Date</span><span>Solar</span><span>Grid</span><span>Output</span><span>Coverage</span><span/></div>
           {rows.map(r => <div className="table-row" key={r.local_date}>
-            <b>{new Date(r.local_date).toLocaleDateString([], { month: "short", day: "numeric" })}</b>
+            <b>{formatDayLabel(r.local_date, days?.today)}</b>
             <span>{formatKwh(r.solar_energy_wh)} kWh</span>
             <span>{formatKwh(r.grid_energy_wh)} kWh</span>
             <span>{formatKwh(r.total_output_wh)} kWh</span>
             <span>{toNum(r.coverage_pct) === undefined ? "—" : <><i className="coverage-mini"><i style={{ width: `${Math.min(100, toNum(r.coverage_pct) ?? 0)}%` }}/></i>{formatPct(r.coverage_pct, 1)}</>}</span>
-            <span>{formatCount(r.sample_count)} samples</span>
+            <button className="text-button" onClick={() => showDay(r.local_date.slice(0, 10))}>View day →</button>
           </div>)}
         </div>
       </section>
@@ -323,7 +402,8 @@ function History() {
 
 function Events() {
   const { deviceId, reloadToken } = useDashboard();
-  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 30_000, reloadToken);
+  // This page is the full log; the Overview timeline is the one scoped to a day.
+  const events = useJson<EventRow[]>(`${withDevice("/api/v1/events", deviceId)}${withDevice("/api/v1/events", deviceId).includes("?") ? "&" : "?"}all=true`, 30_000, reloadToken);
   const [filter, setFilter] = useState<string>("all");
   const rows = events.data ?? [];
   const counts = { solar: 0, charge: 0, discharge: 0, grid: 0, quality: 0, full: 0 } as Record<string, number>;
@@ -417,11 +497,11 @@ function DeviceCard({ device, connectorName }: { device: DeviceSummary; connecto
 }
 
 function DataPage() {
-  const { deviceId, reloadToken } = useDashboard();
+  const { deviceId, reloadToken, date, days } = useDashboard();
   const stats = useJson<StatsResponse>(withDevice("/api/v1/stats", deviceId), 60_000, reloadToken);
   const s = stats.data;
   const exports: [string, string, string][] = [
-    ["Raw telemetry", "Normalized measurements for the last 24 hours.", withDevice("/api/v1/export/telemetry.csv", deviceId)],
+    ["Raw telemetry", `Every measurement recorded on ${formatDayLabel(date, days?.today)}, 00:00 to 24:00.`, withDay("/api/v1/export/telemetry.csv", deviceId, date)],
     ["Daily summaries", "One row per day with energy, peaks, SOC and coverage.", withDevice("/api/v1/daily", deviceId)],
     ["Detected events", "Sessions, transitions and data-quality events.", withDevice("/api/v1/events", deviceId)],
   ];
@@ -484,9 +564,13 @@ export function FlowMetricsApp() {
   const [selected, setSelected] = useState<string | undefined>();
   const [reloadToken, setReloadToken] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  // Undefined means "follow today", so the view rolls over at local midnight
+  // instead of pinning to the date the tab happened to be opened on.
+  const [pickedDate, setPickedDate] = useState<string | undefined>();
 
   const deviceList = useJson<DeviceSummary[]>("/api/v1/devices", 30_000, reloadToken);
   const status = useJson<StatusResponse>("/api/v1/status", 30_000, reloadToken);
+  const daysState = useJson<DaysResponse>("/api/v1/days", 300_000, reloadToken);
   const devices = useMemo(() => deviceList.data ?? [], [deviceList.data]);
   const batteries = useMemo(() => devices.filter(d => !d.combined), [devices]);
   const deviceId = selected ?? batteries[0]?.id;
@@ -514,9 +598,13 @@ export function FlowMetricsApp() {
     [samples, combinedSample],
   );
 
-  const events = useJson<EventRow[]>(withDevice("/api/v1/events", deviceId), 60_000, reloadToken);
+  const days = daysState.data;
+  // The server owns the timezone, so "today" comes from it rather than the browser.
+  const date = pickedDate ?? days?.today ?? "";
+  const isToday = !!days?.today && date === days.today;
+
+  const events = useJson<EventRow[]>(withDay("/api/v1/events", deviceId, date), 60_000, reloadToken);
   const mode = status.data?.mode;
-  const today = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   const soc = sample?.batterySocPct ?? device?.batterySocPct ?? undefined;
   const warningCount = (events.data ?? []).filter(e => e.severity === "warning").length;
 
@@ -540,9 +628,15 @@ export function FlowMetricsApp() {
   useEffect(() => { document.documentElement.dataset.theme = dark ? "dark" : "light"; }, [dark]);
   const content = useMemo(() => ({ Overview: <Overview/>, History: <History/>, Events: <Events/>, Devices: <Devices/>, Data: <DataPage/>, Settings: <Settings/>, About: <About/> })[active], [active]);
 
+  // Choosing today clears the pin so the view keeps following the clock.
+  const setDate = useCallback((next: string) => setPickedDate(next === days?.today ? undefined : next), [days?.today]);
+  // "View day" from the history table should land on that day's Overview, not
+  // silently change a date the reader cannot see from the table.
+  const showDay = useCallback((next: string) => { setDate(next); setActive("Overview"); }, [setDate]);
+
   const value = useMemo<DashboardValue>(
-    () => ({ deviceId, setDeviceId: setSelected, devices, samples: liveSamples, connected, reloadToken, refresh, refreshing }),
-    [deviceId, devices, liveSamples, connected, reloadToken, refresh, refreshing],
+    () => ({ deviceId, setDeviceId: setSelected, devices, samples: liveSamples, connected, reloadToken, refresh, refreshing, date, setDate, showDay, days, isToday }),
+    [deviceId, devices, liveSamples, connected, reloadToken, refresh, refreshing, date, setDate, showDay, days, isToday],
   );
 
   return <DashboardContext.Provider value={value}>
@@ -568,8 +662,14 @@ export function FlowMetricsApp() {
       <div className="main-shell">
         <header className="topbar">
           <button className="mobile-menu" onClick={()=>setMenu(!menu)} aria-label="Toggle navigation">☰</button>
-          <div><p>{active === "Overview" ? today : active}</p><span>{active === "Overview" ? (devices.length > 1 && device ? `${device.name} — a clear view of your home energy.` : "A clear view of your home energy.") : "FlowMetrics energy historian"}</span></div>
+          <div>
+            <p>{active === "Overview" && date ? formatDayLabel(date, days?.today) : active}</p>
+            <span>{active === "Overview"
+              ? `${devices.length > 1 && device ? `${device.name} — ` : ""}${isToday ? "midnight to now" : "midnight to midnight"}`
+              : "FlowMetrics energy historian"}</span>
+          </div>
           <div className="top-actions">
+            {active === "Overview" && <DayNav/>}
             <span
               className={`feed-state${connected && !stale ? " live" : ""}`}
               title={!connected ? "Stream disconnected — polling instead"

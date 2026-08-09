@@ -103,6 +103,14 @@ export interface DeviceSummary {
   combined: boolean;
 }
 
+export interface DaysResponse {
+  timezone: string;
+  today: string;
+  first: string;
+  last: string;
+  dates: string[];
+}
+
 export interface StatsResponse {
   sampleCount: number;
   firstObservedAt: string | null;
@@ -167,10 +175,46 @@ export function useNow(intervalMs = 30_000): number {
   return now;
 }
 
-/** Appends ?device= when a device is selected, preserving any existing query. */
+/** Appends query parameters, preserving any already present. */
+function withParams(path: string, params: Record<string, string | undefined>): string {
+  const pairs = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
+  if (!pairs.length) return path;
+  const query = pairs.map(([k, v]) => `${k}=${encodeURIComponent(v as string)}`).join("&");
+  return `${path}${path.includes("?") ? "&" : "?"}${query}`;
+}
+
+/** Appends ?device= when a device is selected. */
 export function withDevice(path: string, deviceId?: string): string {
-  if (!deviceId) return path;
-  return `${path}${path.includes("?") ? "&" : "?"}device=${encodeURIComponent(deviceId)}`;
+  return withParams(path, { device: deviceId });
+}
+
+/** Appends ?device= and ?date= for the day-scoped views. */
+export function withDay(path: string, deviceId?: string, date?: string): string {
+  return withParams(path, { device: deviceId, date });
+}
+
+// ---- calendar days ---------------------------------------------------------
+
+/** Shifts a `YYYY-MM-DD` date by whole days without touching timezones. */
+export function shiftDate(date: string, days: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/**
+ * Human label for a calendar date. Rendered from the date parts directly rather
+ * than `new Date(date)`, which would parse as UTC midnight and show the previous
+ * day for anyone west of Greenwich.
+ */
+export function formatDayLabel(date: string, today?: string): string {
+  if (today) {
+    if (date === today) return "Today";
+    if (date === shiftDate(today, -1)) return "Yesterday";
+  }
+  const [y, m, d] = date.split("-").map(Number);
+  const local = new Date(y, m - 1, d);
+  const sameYear = today ? Number(today.slice(0, 4)) === y : true;
+  return local.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) });
 }
 
 export type SampleMap = Record<string, Sample>;

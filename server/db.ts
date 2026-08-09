@@ -3,6 +3,17 @@ import { resolve } from "node:path";
 import pg from "pg";
 import type { NormalizedTelemetry } from "../packages/core/index";
 
+/**
+ * Return `date` columns as plain `YYYY-MM-DD` strings.
+ *
+ * By default node-postgres builds a JS Date at *the server's* local midnight,
+ * which serialises to an instant. A browser in another timezone then parses that
+ * back to the previous or next calendar day, so `local_date` would silently
+ * disagree with the day it describes. A calendar date has no time zone; keeping
+ * it a string keeps it that way.
+ */
+pg.types.setTypeParser(1082, value => value);
+
 export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 export async function runMigrations() {

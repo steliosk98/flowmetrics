@@ -1,4 +1,4 @@
-import { integrateTelemetry, type NormalizedTelemetry } from "../packages/core/index";
+import { integrateTelemetry, localDateOf, localDayRange, type LocalDate, type NormalizedTelemetry } from "../packages/core/index";
 import { pool } from "./db";
 
 type TelemetryRow = Record<string, unknown>;
@@ -27,11 +27,20 @@ export async function getSamples(deviceId: string, from: Date, to: Date, maxPoin
   return rows.rows.map(rowToSample);
 }
 
-export async function rebuildDay(deviceId: string, day: Date, expectedIntervalSeconds = 10) {
+/**
+ * Rebuilds one local day's rollup.
+ *
+ * `day` may be a calendar date (`YYYY-MM-DD`) or an instant, which is resolved to
+ * the date it falls on in the device's own timezone. Boundaries are local
+ * midnight to local midnight — using UTC midnight would shift every total by the
+ * zone offset and file evening samples under the wrong date.
+ */
+export async function rebuildDay(deviceId: string, day: Date | LocalDate, expectedIntervalSeconds = 10) {
   const device = await pool.query<{ timezone: string; capacity_wh: number | null }>("SELECT timezone,capacity_wh FROM devices WHERE id=$1", [deviceId]);
   if (!device.rowCount) return;
   const timezone = device.rows[0].timezone;
-  const start = new Date(day); start.setUTCHours(0,0,0,0); const end = new Date(start.getTime() + 86_400_000);
+  const localDate = typeof day === "string" ? day : localDateOf(day, timezone);
+  const { start, end } = localDayRange(localDate, timezone);
   const samples = await getSamples(deviceId, start, end, Number.MAX_SAFE_INTEGER);
   if (samples.length < 2) return;
   const integrated = integrateTelemetry(samples, { expectedIntervalSeconds });
@@ -40,5 +49,5 @@ export async function rebuildDay(deviceId: string, day: Date, expectedIntervalSe
   const minSoc = socSamples.reduce((a,b) => a.batterySocPct! < b.batterySocPct! ? a : b, socSamples[0]); const maxSoc = socSamples.reduce((a,b) => a.batterySocPct! > b.batterySocPct! ? a : b, socSamples[0]);
   const activeSeconds = (field: keyof NormalizedTelemetry, threshold: number) => samples.slice(1).reduce((sum,sample,i) => Number(sample[field] ?? 0) >= threshold ? sum + Math.min(120,(sample.observedAt.getTime()-samples[i].observedAt.getTime())/1000) : sum,0);
   const capacity = device.rows[0].capacity_wh;
-  await pool.query(`INSERT INTO energy_daily (device_id,local_date,timezone,solar_energy_wh,grid_energy_wh,battery_charge_wh,battery_discharge_wh,ac_output_wh,dc_output_wh,total_output_wh,peak_solar_w,peak_solar_at,peak_grid_w,peak_grid_at,peak_output_w,peak_output_at,min_soc_pct,min_soc_at,max_soc_pct,max_soc_at,solar_active_seconds,grid_import_seconds,battery_charging_seconds,battery_discharging_seconds,equivalent_cycle_fraction,sample_count,valid_integration_seconds,gap_seconds,coverage_pct,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,now()) ON CONFLICT (device_id,local_date) DO UPDATE SET solar_energy_wh=EXCLUDED.solar_energy_wh,grid_energy_wh=EXCLUDED.grid_energy_wh,battery_charge_wh=EXCLUDED.battery_charge_wh,battery_discharge_wh=EXCLUDED.battery_discharge_wh,total_output_wh=EXCLUDED.total_output_wh,peak_solar_w=EXCLUDED.peak_solar_w,peak_solar_at=EXCLUDED.peak_solar_at,peak_grid_w=EXCLUDED.peak_grid_w,peak_grid_at=EXCLUDED.peak_grid_at,peak_output_w=EXCLUDED.peak_output_w,peak_output_at=EXCLUDED.peak_output_at,min_soc_pct=EXCLUDED.min_soc_pct,min_soc_at=EXCLUDED.min_soc_at,max_soc_pct=EXCLUDED.max_soc_pct,max_soc_at=EXCLUDED.max_soc_at,sample_count=EXCLUDED.sample_count,valid_integration_seconds=EXCLUDED.valid_integration_seconds,gap_seconds=EXCLUDED.gap_seconds,coverage_pct=EXCLUDED.coverage_pct,updated_at=now()`, [deviceId,start.toISOString().slice(0,10),timezone,integrated.energyWh.solarInputW,integrated.energyWh.gridInputW,integrated.energyWh.batteryChargePowerW,integrated.energyWh.batteryDischargePowerW,integrated.energyWh.acOutputW,integrated.energyWh.dcOutputW,integrated.energyWh.totalOutputW,peak("solarInputW").solarInputW,peak("solarInputW").observedAt,peak("gridInputW").gridInputW,peak("gridInputW").observedAt,peak("totalOutputW").totalOutputW,peak("totalOutputW").observedAt,minSoc?.batterySocPct,minSoc?.observedAt,maxSoc?.batterySocPct,maxSoc?.observedAt,activeSeconds("solarInputW",35),activeSeconds("gridInputW",40),activeSeconds("batteryChargePowerW",30),activeSeconds("batteryDischargePowerW",30),capacity ? integrated.energyWh.batteryDischargePowerW/capacity : null,integrated.sampleCount,integrated.validIntegrationSeconds,integrated.gapSeconds,integrated.coveragePct]);
+  await pool.query(`INSERT INTO energy_daily (device_id,local_date,timezone,solar_energy_wh,grid_energy_wh,battery_charge_wh,battery_discharge_wh,ac_output_wh,dc_output_wh,total_output_wh,peak_solar_w,peak_solar_at,peak_grid_w,peak_grid_at,peak_output_w,peak_output_at,min_soc_pct,min_soc_at,max_soc_pct,max_soc_at,solar_active_seconds,grid_import_seconds,battery_charging_seconds,battery_discharging_seconds,equivalent_cycle_fraction,sample_count,valid_integration_seconds,gap_seconds,coverage_pct,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,now()) ON CONFLICT (device_id,local_date) DO UPDATE SET solar_energy_wh=EXCLUDED.solar_energy_wh,grid_energy_wh=EXCLUDED.grid_energy_wh,battery_charge_wh=EXCLUDED.battery_charge_wh,battery_discharge_wh=EXCLUDED.battery_discharge_wh,total_output_wh=EXCLUDED.total_output_wh,peak_solar_w=EXCLUDED.peak_solar_w,peak_solar_at=EXCLUDED.peak_solar_at,peak_grid_w=EXCLUDED.peak_grid_w,peak_grid_at=EXCLUDED.peak_grid_at,peak_output_w=EXCLUDED.peak_output_w,peak_output_at=EXCLUDED.peak_output_at,min_soc_pct=EXCLUDED.min_soc_pct,min_soc_at=EXCLUDED.min_soc_at,max_soc_pct=EXCLUDED.max_soc_pct,max_soc_at=EXCLUDED.max_soc_at,sample_count=EXCLUDED.sample_count,valid_integration_seconds=EXCLUDED.valid_integration_seconds,gap_seconds=EXCLUDED.gap_seconds,coverage_pct=EXCLUDED.coverage_pct,updated_at=now()`, [deviceId,localDate,timezone,integrated.energyWh.solarInputW,integrated.energyWh.gridInputW,integrated.energyWh.batteryChargePowerW,integrated.energyWh.batteryDischargePowerW,integrated.energyWh.acOutputW,integrated.energyWh.dcOutputW,integrated.energyWh.totalOutputW,peak("solarInputW").solarInputW,peak("solarInputW").observedAt,peak("gridInputW").gridInputW,peak("gridInputW").observedAt,peak("totalOutputW").totalOutputW,peak("totalOutputW").observedAt,minSoc?.batterySocPct,minSoc?.observedAt,maxSoc?.batterySocPct,maxSoc?.observedAt,activeSeconds("solarInputW",35),activeSeconds("gridInputW",40),activeSeconds("batteryChargePowerW",30),activeSeconds("batteryDischargePowerW",30),capacity ? integrated.energyWh.batteryDischargePowerW/capacity : null,integrated.sampleCount,integrated.validIntegrationSeconds,integrated.gapSeconds,integrated.coveragePct]);
 }
